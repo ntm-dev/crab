@@ -1,0 +1,11 @@
+[
+  {
+    "label": "Debug Crab (CodeLLDB)",
+    "adapter": "CodeLLDB",
+    "build": {
+      "label": "Build Crab",
+      "command": "cargo",
+      "args": ["build", "-p", "crab", "--bin", "crab"],
+    },
+  },
+]

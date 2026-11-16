@@ -1,0 +1,24 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=$APP_NAME
+GenericName=Text Editor
+GenericName[vi]=Trình soạn thảo văn bản
+Comment=A fast, native code editor.
+Comment[vi]=Trình soạn thảo mã nguồn gốc, nhanh.
+TryExec=$APP_CLI
+StartupNotify=$DO_STARTUP_NOTIFY
+Exec=$APP_CLI $APP_ARGS
+Icon=$APP_ICON
+Categories=Utility;TextEditor;Development;IDE;
+Keywords=crab;zed;
+# To add Crab to "Open Folder With..." context menu, add `inode/directory` to the MimeType field (semicolon separated)
+# Arch linux users have reported this setting Crab as default file browser. See https://github.com/zed-industries/zed/pull/39076 and related issues.
+# If this happens to you, an unconfirmed fix may be to install Arch's `gnome-defaults-list` package.
+MimeType=text/plain;application/x-zerosize;x-scheme-handler/crab;
+Actions=NewWorkspace;
+
+[Desktop Action NewWorkspace]
+Exec=$APP_CLI --new $APP_ARGS
+Name=Open a new workspace
+Name[vi]=Mở không gian làm việc mới

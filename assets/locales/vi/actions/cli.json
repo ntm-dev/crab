@@ -1,0 +1,10 @@
+{
+  "cli::InstallCliBinary": {
+    "description": "Cài công cụ dòng lệnh của Crab vào PATH của hệ thống.",
+    "name": "Cài công cụ dòng lệnh"
+  },
+  "cli::RegisterCrabScheme": {
+    "description": "Đăng ký trình xử lý cho liên kết crab://.",
+    "name": "Đăng ký liên kết crab://"
+  }
+}

@@ -1,0 +1,17 @@
+// Crab settings
+//
+// For information on how to configure Crab, see the Crab
+// documentation: https://zed.dev/docs/configuring-zed
+//
+// To see all of Crab's default settings without changing your
+// custom settings, run `crab: open default settings` from the
+// command palette (cmd-shift-p / ctrl-shift-p)
+{
+  "ui_font_size": 16,
+  "buffer_font_size": 15,
+  "theme": {
+    "mode": "system",
+    "light": "Crab Light",
+    "dark": "Crab Dark",
+  },
+}
