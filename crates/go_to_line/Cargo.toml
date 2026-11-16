@@ -19,6 +19,7 @@ i18n.workspace = true
 language.workspace = true
 menu.workspace = true
 multi_buffer.workspace = true
+picker.workspace = true
 settings.workspace = true
 text.workspace = true
 theme.workspace = true

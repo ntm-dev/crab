@@ -1,6 +1,4 @@
 {
-  "Agent needs you": "Tác tử cần bạn xử lý",
-  "Agent working": "Tác tử đang làm việc",
   "Application menu": "Menu ứng dụng",
   "Branch & Stash": "Nhánh và stash",
   "Close Announcement Banner": "Đóng biểu ngữ thông báo",
@@ -18,7 +16,6 @@
   "Loading {name}…": "Đang tải {name}…",
   "Lost connection to {host}. Reconnecting...": "Mất kết nối tới {host}. Đang kết nối lại…",
   "Mark this project as trusted and unlock all features": "Đánh dấu dự án này là tin cậy để mở khóa mọi tính năng",
-  "More Open Projects": "Các dự án đang mở khác",
   "Open Application Menu": "Mở menu ứng dụng",
   "Open Recent Project": "Mở dự án gần đây",
   "Recent Projects": "Dự án gần đây",

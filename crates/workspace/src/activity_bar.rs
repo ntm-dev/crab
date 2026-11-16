@@ -40,8 +40,8 @@ fn icon_rems(window: &Window, cx: &App) -> Rems {
     rems(f32::from(icon_size(window, cx)) / f32::from(window.rem_size()))
 }
 
-fn button_height(_window: &Window, _cx: &App) -> Pixels {
-    BUTTON_SIZE
+fn button_height(window: &Window, _cx: &App) -> Pixels {
+    window.rem_size() * (f32::from(BUTTON_SIZE) / ui::REFERENCE_UI_FONT_SIZE)
 }
 
 pub(crate) fn bar_width(window: &Window, cx: &App) -> Pixels {
@@ -277,7 +277,7 @@ impl ActivityBar {
 
         let icon_rems = icon_rems(window, cx);
         let button_height = button_height(window, cx);
-        let button_width = BUTTON_SIZE;
+        let button_width = button_height;
         let active_icon_color = cx.theme().colors().tab_active_foreground;
         let active_background = cx.theme().colors().element_selected;
         let hover_background = cx.theme().colors().element_hover;
@@ -412,7 +412,7 @@ impl ActivityBar {
             .trigger_with_tooltip(
                 IconButton::new("activity-bar-settings", IconName::ActivitySettings)
                     .size(ButtonSize::Large)
-                    .width(BUTTON_SIZE)
+                    .width(button_height(window, cx))
                     .height(button_height(window, cx).into())
                     .style(ButtonStyle::Transparent)
                     .icon_size(IconSize::Custom(icon_rems(window, cx)))

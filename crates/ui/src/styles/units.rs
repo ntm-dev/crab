@@ -14,6 +14,16 @@ pub fn rems_from_px(px: impl Into<f32>) -> Rems {
     rems(px.into() / BASE_REM_SIZE_IN_PX)
 }
 
+/// The UI font size, in pixels, that fixed pixel measurements are designed for.
+pub const REFERENCE_UI_FONT_SIZE: f32 = 13.;
+
+/// Returns a rem value for a pixel measurement designed at the reference UI font
+/// size, so the measurement grows and shrinks together with the UI zoom level.
+#[inline(always)]
+pub fn scaled_px(px: f32) -> Rems {
+    rems(px / REFERENCE_UI_FONT_SIZE)
+}
+
 /// Returns a [`Length`] corresponding to the specified percentage of the viewport's width.
 ///
 /// `percent` should be a value between `0.0` and `1.0`.

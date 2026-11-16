@@ -20,11 +20,12 @@ use git::status::GitSummary;
 use git_ui_core::file_diff_view::FileDiffView;
 use gpui::{
     Action, Anchor, AnyElement, App, AsyncWindowContext, Bounds, ClipboardItem, Context,
-    CursorStyle, DismissEvent, Div, DragMoveEvent, Entity, EventEmitter, ExternalDragPayload,
+    CursorStyle, DismissEvent, Div, DragMoveEvent, Entity, EntityId, EventEmitter, ExternalDragPayload,
     ExternalPaths, FileDragPaths, FileDropEvent, FocusHandle, Focusable, FontWeight, Hsla,
     InteractiveElement, KeyContext, ListHorizontalSizingBehavior, ListSizingBehavior, Modifiers,
     ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseExitEvent, ParentElement,
-    PathPromptOptions, Pixels, Point, PromptButton, PromptLevel, Render, ScrollStrategy, Stateful,
+    PathPromptOptions, Pixels, Point, PromptButton, PromptLevel, Render, ScrollHandle,
+    ScrollStrategy, Stateful,
     Styled, Subscription, Task, UniformListScrollHandle, WeakEntity, Window, actions, anchored,
     deferred, div, hsla, linear_color_stop, linear_gradient, point, px, size, transparent_white,
     uniform_list,
@@ -180,6 +181,13 @@ pub struct ProjectPanel {
     update_visible_entries_task: UpdateVisibleEntriesTask,
     undo_manager: UndoManager,
     open_editors_expanded: bool,
+    explorer_expanded: bool,
+    outline_panel: Option<Entity<outline_panel::OutlinePanel>>,
+    outline_expanded: bool,
+    open_editors_scroll_handle: ScrollHandle,
+    /// The active item the "Open Editors" list was last scrolled to, so the list only
+    /// jumps to an item when it becomes active and not on every render.
+    open_editors_revealed_item: std::cell::Cell<Option<EntityId>>,
     state: State,
 }
 
@@ -960,6 +968,11 @@ impl ProjectPanel {
                 update_visible_entries_task: Default::default(),
                 undo_manager: UndoManager::new(workspace.weak_handle(), weak_project_panel, &cx),
                 open_editors_expanded: true,
+                explorer_expanded: true,
+                outline_panel: None,
+                outline_expanded: false,
+                open_editors_scroll_handle: ScrollHandle::new(),
+                open_editors_revealed_item: Default::default(),
             };
             this.update_visible_entries(None, false, false, window, cx);
 
@@ -1727,7 +1740,16 @@ impl ProjectPanel {
     }
 
     /// VS Code-style "OPEN EDITORS" section listing the files open in every pane.
-    fn render_open_editors(&self, cx: &Context<Self>) -> impl IntoElement {
+    fn render_open_editors(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        // VS Code shows at most 9 open editors (`explorer.openEditors.visible`) before the
+        // list scrolls.
+        const OPEN_EDITORS_ROW_HEIGHT: f32 = 22.;
+        const OPEN_EDITORS_MAX_VISIBLE_ROWS: f32 = 9.;
+
         let expanded = self.open_editors_expanded;
         let colors = cx.theme().colors().clone();
         let mut rows = Vec::new();
@@ -1749,6 +1771,11 @@ impl ProjectPanel {
                     let status_badges = open_editor_path
                         .as_ref()
                         .and_then(|path| workspace::item_status_badges(&project, path, cx));
+                    let selected = is_active_pane && ix == active_ix;
+                    if selected && self.open_editors_revealed_item.get() != Some(item_id) {
+                        self.open_editors_scroll_handle.scroll_to_item(row_ix);
+                        self.open_editors_revealed_item.set(Some(item_id));
+                    }
                     let label_color = open_editor_path
                         .as_ref()
                         .map(|path| {
@@ -1758,20 +1785,29 @@ impl ProjectPanel {
                             if summary.error_count > 0 {
                                 return Color::Error;
                             }
-                            project_ref
+                            if summary.warning_count > 0 {
+                                return Color::Warning;
+                            }
+                            let git_color = project_ref
                                 .git_store()
                                 .read(cx)
                                 .project_path_git_status(path, cx)
                                 .map(|status| {
                                     entry_git_aware_label_color(status.summary(), false, false)
                                 })
-                                .unwrap_or(Color::Default)
+                                .unwrap_or(Color::Default);
+                            if !matches!(git_color, Color::Default | Color::Muted) {
+                                git_color
+                            } else if selected {
+                                Color::Custom(colors.tab_active_foreground)
+                            } else {
+                                Color::Default
+                            }
                         })
                         .unwrap_or(Color::Default);
                     let file_icon = item
                         .project_path(cx)
                         .and_then(|path| FileIcons::get_icon(path.path.as_std_path(), cx));
-                    let selected = is_active_pane && ix == active_ix;
                     let select_pane = pane.clone();
                     let close_pane = pane.clone();
                     let directory = item
@@ -1796,7 +1832,7 @@ impl ProjectPanel {
                             .gap_1()
                             .pl_1()
                             .pr_1()
-                            .h(px(22.))
+                            .h(ui::scaled_px(22.))
                             .items_center()
                             .cursor_pointer()
                             .when(selected, |row| row.bg(colors.element_selected))
@@ -1844,11 +1880,7 @@ impl ProjectPanel {
                                     .overflow_hidden()
                                     .child(
                                         Label::new(title)
-                                            .color(if matches!(label_color, Color::Default) {
-                                                close_color
-                                            } else {
-                                                label_color
-                                            })
+                                            .color(label_color)
                                             .truncate(),
                                     )
                                     .when_some(directory, |this, directory| {
@@ -1877,7 +1909,7 @@ impl ProjectPanel {
                 h_flex()
                     .id("open-editors-header")
                     .w_full()
-                    .h(px(22.))
+                    .h(ui::scaled_px(22.))
                     .px_1()
                     .gap_1()
                     .cursor_pointer()
@@ -1899,10 +1931,89 @@ impl ProjectPanel {
                         cx.notify();
                     })),
             )
-            .children(rows)
+            .child(
+                v_flex()
+                    .id("open-editors-list")
+                    .relative()
+                    .w_full()
+                    .max_h(ui::scaled_px(OPEN_EDITORS_ROW_HEIGHT * OPEN_EDITORS_MAX_VISIBLE_ROWS))
+                    .overflow_y_scroll()
+                    .track_scroll(&self.open_editors_scroll_handle)
+                    .children(rows)
+                    .vertical_scrollbar_for(&self.open_editors_scroll_handle, window, cx),
+            )
+            .into_any_element()
     }
 
     /// Header above the folder tree with new file / new folder / refresh / collapse buttons.
+    pub fn set_outline_panel(
+        &mut self,
+        panel: Entity<outline_panel::OutlinePanel>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let expanded = self.outline_expanded;
+        panel.update(cx, |panel, cx| {
+            workspace::dock::Panel::set_active(panel, expanded, window, cx)
+        });
+        self.outline_panel = Some(panel);
+        cx.notify();
+    }
+
+    fn render_outline_section(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        let outline = self.outline_panel.clone()?;
+        let expanded = self.outline_expanded;
+        let toggled = outline.clone();
+        Some(
+            v_flex()
+                .w_full()
+                .flex_none()
+                .child(
+                    h_flex()
+                        .id("outline-section-header")
+                        .w_full()
+                        .h(ui::scaled_px(22.))
+                        .px_1()
+                        .gap_1()
+                        .border_t_1()
+                        .border_color(cx.theme().colors().border)
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.outline_expanded = !this.outline_expanded;
+                            let active = this.outline_expanded;
+                            toggled.update(cx, |panel, cx| {
+                                workspace::dock::Panel::set_active(panel, active, window, cx)
+                            });
+                            cx.notify();
+                        }))
+                        .child(
+                            Icon::new(if expanded {
+                                IconName::ChevronDown
+                            } else {
+                                IconName::ChevronRight
+                            })
+                            .size(IconSize::Small)
+                            .color(Color::Muted),
+                        )
+                        .child(
+                            Label::new(t!("Outline"))
+                                .weight(FontWeight::SEMIBOLD),
+                        ),
+                )
+                .when(expanded, |this| {
+                    this.child(
+                        div()
+                            .relative()
+                            .w_full()
+                            .h(ui::scaled_px(300.))
+                            .overflow_hidden()
+                            .child(outline),
+                    )
+                })
+                .into_any_element(),
+        )
+    }
+
     fn render_explorer_header(&self, cx: &Context<Self>) -> impl IntoElement {
         // VS Code shows the workspace (root folder) name in upper case.
         let title = {
@@ -1915,17 +2026,28 @@ impl ProjectPanel {
                 _ => t!("FOLDERS").to_string(),
             }
         };
+        let explorer_expanded = self.explorer_expanded;
         h_flex()
+            .id("explorer-header")
             .w_full()
-            .h(px(22.))
+            .h(ui::scaled_px(22.))
             .px_1()
             .gap_1()
             .border_t_1()
             .border_color(cx.theme().colors().border)
+            .cursor_pointer()
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.explorer_expanded = !this.explorer_expanded;
+                cx.notify();
+            }))
             .child(
-                Icon::new(IconName::ChevronDown)
-                    .size(IconSize::Small)
-                    .color(Color::Muted),
+                Icon::new(if explorer_expanded {
+                    IconName::ChevronDown
+                } else {
+                    IconName::ChevronRight
+                })
+                .size(IconSize::Small)
+                .color(Color::Muted),
             )
             .child(
                 Label::new(title)
@@ -1935,7 +2057,9 @@ impl ProjectPanel {
             .child(div().flex_1())
             .child(
                 IconButton::new("explorer-new-file", IconName::NewFile)
-                    .icon_size(IconSize::Small)
+                    .icon_size(IconSize::Custom(rems(16. / 13.)))
+                    .width(ui::scaled_px(22.))
+                    .height(ui::scaled_px(22.).into())
                     .tooltip(Tooltip::text(t!("New File")))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.new_file(&NewFile, window, cx);
@@ -1943,7 +2067,9 @@ impl ProjectPanel {
             )
             .child(
                 IconButton::new("explorer-new-folder", IconName::NewFolder)
-                    .icon_size(IconSize::Small)
+                    .icon_size(IconSize::Custom(rems(16. / 13.)))
+                    .width(ui::scaled_px(22.))
+                    .height(ui::scaled_px(22.).into())
                     .tooltip(Tooltip::text(t!("New Folder")))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.new_directory(&NewDirectory, window, cx);
@@ -1951,7 +2077,9 @@ impl ProjectPanel {
             )
             .child(
                 IconButton::new("explorer-refresh", IconName::RotateCw)
-                    .icon_size(IconSize::Small)
+                    .icon_size(IconSize::Custom(rems(16. / 13.)))
+                    .width(ui::scaled_px(22.))
+                    .height(ui::scaled_px(22.).into())
                     .tooltip(Tooltip::text(t!("Refresh Explorer")))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.refresh_explorer(cx);
@@ -1959,7 +2087,9 @@ impl ProjectPanel {
             )
             .child(
                 IconButton::new("explorer-collapse", IconName::CollapseAll)
-                    .icon_size(IconSize::Small)
+                    .icon_size(IconSize::Custom(rems(16. / 13.)))
+                    .width(ui::scaled_px(22.))
+                    .height(ui::scaled_px(22.).into())
                     .tooltip(Tooltip::text(t!("Collapse All")))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.collapse_all_entries(&CollapseAllEntries, window, cx);
@@ -7608,6 +7738,23 @@ impl ProjectPanel {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> EntryDetails {
+        let git_status = if entry.is_dir() {
+            self.project
+                .read(cx)
+                .git_store()
+                .read(cx)
+                .first_propagating_status_under(
+                    &ProjectPath {
+                        worktree_id,
+                        path: entry.path.clone(),
+                    },
+                    cx,
+                )
+                .map(|status| status.summary())
+                .unwrap_or_default()
+        } else {
+            git_status
+        };
         let (show_file_icons, folder_indicator) = {
             let settings = ProjectPanelSettings::get_global(cx);
             (settings.file_icons, settings.folder_indicator)
@@ -7702,10 +7849,25 @@ impl ProjectPanel {
         let reserves_chevron_slot =
             chevron.is_none() && folder_indicator.shows_chevron() && folder_indicator.shows_icon();
 
+        let is_active_file = entry.kind.is_file()
+            && self
+                .workspace
+                .upgrade()
+                .and_then(|workspace| workspace.read(cx).active_item(cx))
+                .and_then(|item| item.project_path(cx))
+                .is_some_and(|active| active.worktree_id == worktree_id && active.path == entry.path);
+
         let filename_text_color = match diagnostic_severity {
             Some(DiagnosticSeverity::ERROR) => Color::Error,
             Some(DiagnosticSeverity::WARNING) => Color::Warning,
-            _ => entry_git_aware_label_color(git_status, entry.is_ignored, is_marked),
+            _ => {
+                let git_color = entry_git_aware_label_color(git_status, entry.is_ignored, is_marked);
+                if is_active_file && matches!(git_color, Color::Default | Color::Muted) {
+                    Color::Custom(cx.theme().colors().tab_active_foreground)
+                } else {
+                    git_color
+                }
+            }
         };
 
         let is_cut = self
@@ -8031,6 +8193,8 @@ impl Render for ProjectPanel {
         }
 
         let has_worktree = !self.state.visible_entries.is_empty();
+        // Built before `project` below borrows `cx`.
+        let open_editors = has_worktree.then(|| self.render_open_editors(window, cx));
         let project = self.project.read(cx);
         let panel_settings = ProjectPanelSettings::get_global(cx);
         let indent_size = panel_settings.indent_size;
@@ -8219,7 +8383,7 @@ impl Render for ProjectPanel {
                         .child(
                             h_flex()
                                 .w_full()
-                                .h(px(35.))
+                                .h(ui::scaled_px(35.))
                                 .flex_none()
                                 .pl(px(6.))
                                 .pr_1()
@@ -8227,9 +8391,10 @@ impl Render for ProjectPanel {
                                 .child(Label::new(t!("Explorer")))
                                 .child(self.render_explorer_more_actions(cx)),
                         )
-                        .child(self.render_open_editors(cx))
+                        .children(open_editors)
                         .child(self.render_explorer_header(cx))
                         .child(v_flex().id("project-panel-scroll-area").flex_1().min_h_0().w_full().relative()
+                        .when(!self.explorer_expanded, |this| this.hidden())
                         .child(
                             uniform_list("entries", item_count, {
                                 cx.processor(|this, range: Range<usize>, window, cx| {
@@ -8648,6 +8813,7 @@ impl Render for ProjectPanel {
                             window,
                             cx,
                         ))
+                        .children(self.render_outline_section(cx))
                         .size_full(),
                 )
                 .children(self.context_menu.as_ref().map(|context_menu| {

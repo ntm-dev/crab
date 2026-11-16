@@ -6,15 +6,11 @@
   // - "system": Use the theme that corresponds to the system's appearance
   // - "light": Use the theme indicated by the "light" field
   // - "dark": Use the theme indicated by the "dark" field
-  "theme": {
-    "mode": "system",
-    "light": "VS Code Light 2026",
-    "dark": "Panda Syntax",
-  },
+  "theme": "Panda Crab",
   "icon_theme": {
     "mode": "system",
-    "light": "Seti Light",
-    "dark": "Seti Dark",
+    "light": "VSCode Icons for Zed (Light)",
+    "dark": "VSCode Icons for Zed (Dark)",
   },
   // The name of a base set of key bindings to use.
   // This setting can take the following values:
@@ -28,7 +24,7 @@
   // 7. "Emacs"
   // 8. "Cursor"
   // 9. "None"
-  "base_keymap": "Zed",
+  "base_keymap": "VSCode",
   // The name of a font to use for rendering text in the editor
   "buffer_font_family": "IBM Plex Mono",
   // Set the buffer text's font fallbacks, this will be merged with
@@ -70,7 +66,7 @@
     "calt": false,
   },
   // The weight of the UI font in standard CSS units from 100 to 900.
-  "ui_font_weight": 350,
+  "ui_font_weight": 400,
   // The default font size for text in the UI
   "ui_font_size": 13,
   // The default font size for the commit editor in the git panel and commit modal.
@@ -588,7 +584,7 @@
   // - It is a tab
   // - It is adjacent to an edge (start or end)
   // - It is adjacent to a whitespace (left or right)
-  "show_whitespaces": "selection",
+  "show_whitespaces": "all",
   // Visible characters used to render whitespace when show_whitespaces is enabled.
   "whitespace_map": {
     "space": "•",
@@ -1002,7 +998,7 @@
   },
   "outline_panel": {
     // Whether to show the outline panel button in the status bar
-    "button": true,
+    "button": false,
     // Default width of the outline panel.
     "default_width": 300,
     // Where to dock the outline panel. Can be 'left' or 'right'.
@@ -1190,7 +1186,7 @@
   //     "autosave": "on_focus_change",
   // 4. Save when idle for a certain amount of time:
   //     "autosave": { "after_delay": {"milliseconds": 500} },
-  "autosave": "off",
+  "autosave": "on_focus_change",
   // Maximum number of tabs per pane. Unset for unlimited.
   "max_tabs": null,
   // Settings related to the editor's tab bar.
@@ -1805,7 +1801,7 @@
     "font_size": 12,
     // Set the terminal's font family. If this option is not included,
     // the terminal will default to matching the buffer's font family.
-    // "font_family": "JetBrains Mono",
+    "font_family": "FiraCode Nerd Font Mono",
     // Set the terminal's font fallbacks. If this option is not included,
     // the terminal will default to matching the buffer's font fallbacks.
     // This will be merged with the platform's default font fallbacks
@@ -1932,6 +1928,7 @@
     ],
     "Markdown": [".rules", ".cursorrules", ".windsurfrules", ".clinerules"],
     "Shell Script": [".env.*"],
+    "bat": ["*.csv"],
   },
   // Settings for which version of Node.js and NPM to use when installing
   // language servers and Copilot.

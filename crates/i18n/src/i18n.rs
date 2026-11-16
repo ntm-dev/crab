@@ -796,6 +796,7 @@ mod tests {
     }
 
     const ACTIONS_MISSING_FROM_MACOS_RELEASE: &[&str] = &[
+        "dev::ShowManyNotifications",
         "dev::ShowWorkspaceError",
         "projects::OpenFolderInWsl",
         "projects::OpenWsl",

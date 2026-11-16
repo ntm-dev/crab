@@ -2105,6 +2105,28 @@ impl GitStore {
         })
     }
 
+    pub fn first_propagating_status_under(
+        &self,
+        project_path: &ProjectPath,
+        cx: &App,
+    ) -> Option<FileStatus> {
+        let (repo, repo_path) = self.repository_and_path_for_project_path(project_path, cx)?;
+        let repo = repo.read(cx);
+        let mut cursor = repo.statuses_by_path.cursor::<PathProgress>(());
+        cursor.seek_forward(&PathTarget::Path(&repo_path), Bias::Left);
+        while let Some(entry) = cursor.item() {
+            if !entry.repo_path.starts_with(&repo_path) {
+                break;
+            }
+            let status = entry.status;
+            if !status.is_deleted() && !status.is_ignored() {
+                return Some(status);
+            }
+            cursor.next();
+        }
+        None
+    }
+
     pub fn project_path_git_status(
         &self,
         project_path: &ProjectPath,

@@ -215,9 +215,41 @@ fn install_panic_hook() {
     }));
 }
 
+#[cfg(target_os = "macos")]
+#[allow(clippy::disallowed_methods, reason = "the string is autoreleased")]
+fn set_macos_process_name() {
+    use cocoa::{
+        base::{id, nil},
+        foundation::{NSAutoreleasePool, NSString},
+    };
+    use objc::{class, msg_send, sel, sel_impl};
+
+    unsafe {
+        let pool = NSAutoreleasePool::new(nil);
+        let info: id = msg_send![class!(NSProcessInfo), processInfo];
+        let name = NSString::alloc(nil).init_str("Crab");
+        let _: () = msg_send![info, setProcessName: name];
+
+        let bundle: id = msg_send![class!(NSBundle), mainBundle];
+        let bundle_info: id = msg_send![bundle, infoDictionary];
+        if bundle_info != nil {
+            let is_mutable: bool =
+                msg_send![bundle_info, isKindOfClass: class!(NSMutableDictionary)];
+            if is_mutable {
+                let key = NSString::alloc(nil).init_str("CFBundleName");
+                let _: () = msg_send![bundle_info, setObject: name forKey: key];
+            }
+        }
+        let _: () = msg_send![pool, drain];
+    }
+}
+
 fn main() {
     #[cfg(unix)]
     util::prevent_root_execution();
+
+    #[cfg(target_os = "macos")]
+    set_macos_process_name();
 
     let args = Args::parse();
 

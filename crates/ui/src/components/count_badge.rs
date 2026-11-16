@@ -2,6 +2,9 @@ use gpui::FontWeight;
 
 use crate::prelude::*;
 
+/// The window's rem is the UI font size (13px by default), so 9px is expressed relative to it.
+const DEFAULT_UI_FONT_SIZE_IN_PX: f32 = 13.;
+
 /// A small, pill-shaped badge that displays a numeric count.
 ///
 /// The count is capped at 99 and displayed as "99+" beyond that.
@@ -37,7 +40,7 @@ impl RenderOnce for CountBadge {
             .bg(bg)
             .child(
                 Label::new(label)
-                    .size(LabelSize::Custom(rems_from_px(9_f32)))
+                    .size(LabelSize::Custom(rems(9_f32 / DEFAULT_UI_FONT_SIZE_IN_PX)))
                     .weight(FontWeight::NORMAL)
                     .color(Color::Custom(fg)),
             )

@@ -14,6 +14,7 @@ use project::project_settings::ProjectSettings;
 use settings::Settings;
 use theme_settings::ThemeSettings;
 
+use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::{Arc, LazyLock};
 use std::{any::TypeId, time::Duration};
@@ -23,6 +24,13 @@ use util::ResultExt;
 #[derive(Default)]
 pub struct Notifications {
     notifications: Vec<(NotificationId, AnyView)>,
+    keys: HashMap<NotificationId, String>,
+    toast_epochs: HashMap<NotificationId, u64>,
+    next_epoch: u64,
+    pub(crate) toast_hidden: std::collections::HashSet<NotificationId>,
+    pub(crate) center_visible: bool,
+    pub(crate) do_not_disturb: bool,
+    pub(crate) unseen: usize,
 }
 
 impl Deref for Notifications {
@@ -67,7 +75,16 @@ impl NotificationId {
 pub trait Notification:
     EventEmitter<DismissEvent> + EventEmitter<SuppressEvent> + Focusable + Render
 {
+    fn dedupe_key(&self) -> Option<String> {
+        None
+    }
+
+    fn toast_duration(&self) -> Duration {
+        Duration::from_secs(10)
+    }
 }
+
+pub const MAX_VISIBLE_TOASTS: usize = 3;
 
 pub struct SuppressEvent;
 
@@ -101,8 +118,14 @@ impl Workspace {
         cx: &mut Context<Self>,
         build_notification: impl FnOnce(&mut Context<Self>) -> Entity<V>,
     ) {
+        let dedupe_key = std::rc::Rc::new(std::cell::RefCell::new(None::<String>));
+        let toast_duration = std::rc::Rc::new(std::cell::Cell::new(Duration::from_secs(10)));
+        let captured_key = dedupe_key.clone();
+        let captured_duration = toast_duration.clone();
         self.show_notification_without_handling_dismiss_events(&id, cx, |cx| {
             let notification = build_notification(cx);
+            *captured_key.borrow_mut() = notification.read(cx).dedupe_key();
+            captured_duration.set(notification.read(cx).toast_duration());
             cx.subscribe(&notification, {
                 let id = id.clone();
                 move |this, _, _: &DismissEvent, cx| {
@@ -153,6 +176,31 @@ impl Workspace {
             }
             notification.into()
         });
+        let key = dedupe_key.borrow_mut().take();
+        if let Some(key) = key {
+            self.dedupe_notification(&id, key, cx);
+        }
+        if self.has_notification(&id) {
+            self.schedule_toast_hide(id, toast_duration.get(), cx);
+        }
+    }
+
+    fn schedule_toast_hide(&mut self, id: NotificationId, duration: Duration, cx: &mut Context<Self>) {
+        let epoch = self.notifications.next_epoch;
+        self.notifications.next_epoch += 1;
+        self.notifications.toast_epochs.insert(id.clone(), epoch);
+        self.notifications.toast_hidden.remove(&id);
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(duration).await;
+            this.update(cx, |workspace, cx| {
+                if workspace.notifications.toast_epochs.get(&id) == Some(&epoch) {
+                    workspace.notifications.toast_hidden.insert(id);
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Shows a notification in this workspace's window. Caller must handle dismiss.
@@ -172,6 +220,49 @@ impl Workspace {
         self.dismiss_notification(id, cx);
         self.notifications
             .push((id.clone(), build_notification(cx)));
+        if !self.notifications.center_visible {
+            self.notifications.unseen += 1;
+        }
+        self.schedule_toast_hide(id.clone(), Duration::from_secs(10), cx);
+        cx.notify();
+    }
+
+    fn dedupe_notification(&mut self, id: &NotificationId, key: String, cx: &mut Context<Self>) {
+        let duplicates: Vec<NotificationId> = self
+            .notifications
+            .keys
+            .iter()
+            .filter(|(other, other_key)| *other != id && **other_key == key)
+            .map(|(other, _)| other.clone())
+            .collect();
+        for duplicate in duplicates {
+            self.dismiss_notification(&duplicate, cx);
+        }
+        self.notifications.keys.insert(id.clone(), key);
+    }
+
+    pub fn notification_count(&self) -> usize {
+        self.notifications.len()
+    }
+
+    pub fn unseen_notification_count(&self) -> usize {
+        self.notifications.unseen.min(self.notifications.len())
+    }
+
+    pub fn is_do_not_disturb(&self) -> bool {
+        self.notifications.do_not_disturb
+    }
+
+    pub fn set_do_not_disturb(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.notifications.do_not_disturb = enabled;
+        cx.notify();
+    }
+
+    pub fn set_notification_center_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        self.notifications.center_visible = visible;
+        if visible {
+            self.notifications.unseen = 0;
+        }
         cx.notify();
     }
 
@@ -192,6 +283,9 @@ impl Workspace {
                 true
             }
         });
+        self.notifications.keys.remove(id);
+        self.notifications.toast_epochs.remove(id);
+        self.notifications.toast_hidden.remove(id);
     }
 
     pub fn show_toast(&mut self, toast: Toast, cx: &mut Context<Self>) {
@@ -227,6 +321,9 @@ impl Workspace {
 
     pub fn clear_all_notifications(&mut self, cx: &mut Context<Self>) {
         self.notifications.clear();
+        self.notifications.keys.clear();
+        self.notifications.toast_epochs.clear();
+        self.notifications.toast_hidden.clear();
         cx.notify();
     }
 
@@ -338,16 +435,21 @@ impl Render for LanguageServerPrompt {
         div()
             .id("language_server_prompt_notification")
             .group("language_server_prompt_notification")
-            .occlude()
+            .block_mouse_except_scroll()
             .w_full()
             .max_h(vh(0.8, window))
-            .elevation_3(cx)
+            .bg(cx.theme().colors().elevated_surface_background)
+            .border_1()
+            .border_color(gpui::rgb(0x303031))
+            .rounded(px(4.))
+            .shadow_lg()
             .overflow_y_scroll()
             .track_scroll(&self.scroll_handle)
             .on_modifiers_changed(cx.listener(|_, _, _, cx| cx.notify()))
             .child(
                 v_flex()
-                    .p_3()
+                    .py(px(10.))
+                    .px(px(5.))
                     .overflow_hidden()
                     .child(
                         h_flex()
@@ -488,7 +590,7 @@ pub mod simple_message_notification {
         ScrollHandle, SharedString, Styled, Task,
     };
     use i18n::t;
-    use ui::{CopyButton, Tooltip, WithScrollbar, prelude::*};
+    use ui::{CopyButton, TintColor, Tooltip, prelude::*};
 
     use crate::SuppressNotification;
     use crate::workspace_error::{
@@ -496,6 +598,21 @@ pub mod simple_message_notification {
     };
 
     use super::{Notification, SuppressEvent};
+
+    const MESSAGE_COLLAPSE_THRESHOLD: usize = 52;
+    const MAX_MESSAGE_LENGTH: usize = 1000;
+
+    fn normalize_message(message: SharedString) -> SharedString {
+        let mut text: String = message
+            .chars()
+            .take(MAX_MESSAGE_LENGTH)
+            .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+            .collect();
+        if message.chars().count() > MAX_MESSAGE_LENGTH {
+            text.push('…');
+        }
+        text.into()
+    }
 
     const FADE_OUT_DURATION: Duration = Duration::from_secs(2);
     const FADE_TO_FULL_OPACITY_DURATION: Duration = Duration::from_millis(200);
@@ -661,6 +778,10 @@ pub mod simple_message_notification {
         content_icon_color: Option<Color>,
         secondary_content: Option<SharedString>,
         copy_text: Option<SharedString>,
+        message_text: Option<SharedString>,
+        source: Option<SharedString>,
+        expanded: Option<bool>,
+        toast_duration: Option<Duration>,
         primary_message: Option<SharedString>,
         primary_icon: Option<ActionIcon>,
         primary_icon_color: Option<Color>,
@@ -687,7 +808,24 @@ pub mod simple_message_notification {
     impl EventEmitter<DismissEvent> for MessageNotification {}
     impl EventEmitter<SuppressEvent> for MessageNotification {}
 
-    impl Notification for MessageNotification {}
+    impl Notification for MessageNotification {
+        fn toast_duration(&self) -> Duration {
+            self.toast_duration.unwrap_or(Duration::from_secs(10))
+        }
+
+        fn dedupe_key(&self) -> Option<String> {
+            let message = self.message_text.as_ref()?;
+            Some(format!(
+                "{}|{:?}|{:?}|{:?}|{:?}|{:?}",
+                message,
+                self.content_icon,
+                self.source,
+                self.title,
+                self.primary_message,
+                self.secondary_message
+            ))
+        }
+    }
 
     impl FluentBuilder for MessageNotification {}
 
@@ -696,10 +834,28 @@ pub mod simple_message_notification {
         where
             S: Into<SharedString>,
         {
-            let message = message.into();
-            Self::new_from_builder(cx, move |_, _| {
+            let message = normalize_message(message.into());
+            let text = message.clone();
+            let mut this = Self::new_from_builder(cx, move |_, _| {
                 Label::new(message.clone()).into_any_element()
-            })
+            });
+            this.message_text = Some(text);
+            this
+        }
+
+        fn is_expanded(&self) -> bool {
+            self.expanded.unwrap_or(
+                self.primary_message.is_some()
+                    || self.secondary_message.is_some()
+                    || self.more_info_message.is_some()
+                    || self.source.is_some(),
+            )
+        }
+
+        fn can_collapse(&self) -> bool {
+            self.message_text
+                .as_ref()
+                .is_some_and(|message| message.chars().count() > MESSAGE_COLLAPSE_THRESHOLD)
         }
 
         pub fn new_from_builder<F>(cx: &mut App, content: F) -> MessageNotification
@@ -713,6 +869,10 @@ pub mod simple_message_notification {
                 content_icon_color: None,
                 secondary_content: None,
                 copy_text: None,
+                message_text: None,
+                source: None,
+                expanded: None,
+                toast_duration: None,
                 primary_message: None,
                 primary_icon: None,
                 primary_icon_color: None,
@@ -875,6 +1035,7 @@ pub mod simple_message_notification {
             self
         }
 
+        #[allow(dead_code)]
         fn auto_dismiss(mut self, severity: ErrorSeverity, cx: &mut Context<Self>) -> Self {
             if let Some(delay) = severity.auto_dismiss_delay() {
                 self.auto_hide = Some(AutoHideState::new(delay, cx));
@@ -888,9 +1049,21 @@ pub mod simple_message_notification {
             let primary_action = error.primary_action();
             let secondary_action = error.secondary_action();
 
+            let (icon, icon_color) = match &severity {
+                ErrorSeverity::Warning => (
+                    IconName::Warning,
+                    Color::Custom(gpui::rgb(0xFFCC95).into()),
+                ),
+                ErrorSeverity::Critical | ErrorSeverity::Error => (
+                    IconName::XCircle,
+                    Color::Custom(gpui::rgb(0xFF4B82).into()),
+                ),
+            };
+
             Self::new(primary_message.clone(), cx)
-                .content_icon(IconName::Warning, Color::Error)
-                .button_style(ButtonStyle::Outlined)
+                .content_icon(icon, icon_color)
+                .with_source("Crab")
+                .button_style(ButtonStyle::Tinted(TintColor::Accent))
                 .copy_text(primary_message)
                 .show_suppress_button(false)
                 .when_some(error.secondary_message(), |this, text| {
@@ -944,7 +1117,17 @@ pub mod simple_message_notification {
                             }
                         })
                 })
-                .auto_dismiss(severity, cx)
+                .toast_duration(severity.auto_dismiss_delay().unwrap_or(Duration::from_secs(15)))
+        }
+
+        pub fn with_source<S: Into<SharedString>>(mut self, source: S) -> Self {
+            self.source = Some(source.into());
+            self
+        }
+
+        pub fn toast_duration(mut self, duration: Duration) -> Self {
+            self.toast_duration = Some(duration);
+            self
         }
 
         fn on_hover_changed(&mut self, hovering: bool, cx: &mut Context<Self>) {
@@ -993,16 +1176,48 @@ pub mod simple_message_notification {
             };
 
             let main_content = (self.build_content)(window, cx);
-            let line_height = window.line_height();
 
-            let copy_text = self.copy_text.clone();
+            let colors = cx.theme().colors();
+            let frame_background = colors.elevated_surface_background;
+            let frame_border = gpui::rgb(0x303031);
+            let muted_text = colors.text_muted;
+            let button_background = gpui::rgb(0x45A9F9);
+            let button_hover_background = gpui::rgb(0x676B79);
+            let button_foreground = gpui::rgb(0xffffff);
+            let secondary_background = gpui::rgb(0x3A3D41);
+            let secondary_hover_background = gpui::rgb(0x45494E);
+            let expanded = self.is_expanded();
+            let can_collapse = self.can_collapse();
+            let copy_text = self.copy_text.clone().or_else(|| self.message_text.clone());
             let header_actions = h_flex()
                 .flex_shrink_0()
-                .gap_1()
+                .gap(px(2.))
                 .when_some(copy_text, |el, text| {
                     el.child(
                         CopyButton::new("copy-notification-message", text)
                             .tooltip_label(t!("Copy Message")),
+                    )
+                })
+                .when(can_collapse, |el| {
+                    el.child(
+                        IconButton::new(
+                            "toggle-expanded",
+                            if expanded {
+                                IconName::ChevronUp
+                            } else {
+                                IconName::ChevronDown
+                            },
+                        )
+                        .icon_size(IconSize::Small)
+                        .tooltip(Tooltip::text(if expanded {
+                            t!("Collapse Notification")
+                        } else {
+                            t!("Expand Notification")
+                        }))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.expanded = Some(!expanded);
+                            cx.notify();
+                        })),
                     )
                 })
                 .when(show_close_button, |el| {
@@ -1041,125 +1256,178 @@ pub mod simple_message_notification {
                 || self.secondary_message.is_some()
                 || self.more_info_message.is_some();
 
-            let suffix = h_flex()
-                .gap_1()
-                .children(self.primary_message.iter().map(|message| {
-                    Button::new(("notification-primary", cx.entity_id()), message.clone())
-                        .when_some(self.button_style, |button, style| button.style(style))
-                        .label_size(LabelSize::Small)
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            if let Some(on_click) = this.primary_on_click.as_ref() {
-                                (on_click)(window, cx)
-                            };
-                            this.dismiss(cx)
-                        }))
-                        .when_some(self.primary_icon, |button, icon| {
-                            let element = Icon::new(icon.name)
+            let action_button = |id: ElementId,
+                                 label: SharedString,
+                                 icon: Option<(ActionIcon, Color)>,
+                                 primary: bool| {
+                let (background, hover_background) = if primary {
+                    (button_background, button_hover_background)
+                } else {
+                    (secondary_background, secondary_hover_background)
+                };
+                div()
+                    .id(id)
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(3.))
+                    .h(px(26.))
+                    .px(px(8.))
+                    .border_1()
+                    .border_color(gpui::transparent_black())
+                    .rounded(px(4.))
+                    .cursor_pointer()
+                    .text_size(px(12.))
+                    .bg(background)
+                    .hover(move |style| style.bg(hover_background))
+                    .when_some(icon, |el, (icon, _)| {
+                        el.child(
+                            Icon::new(icon.name)
                                 .size(IconSize::Small)
-                                .color(self.primary_icon_color.unwrap_or(Color::Muted));
-                            match icon.position {
-                                IconPosition::Start => button.start_icon(element),
-                                IconPosition::End => button.end_icon(element),
-                            }
-                        })
+                                .color(Color::Custom(button_foreground.into())),
+                        )
+                    })
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .line_height(px(16.))
+                            .text_color(button_foreground)
+                            .child(label),
+                    )
+            };
+
+            let source = self.source.clone();
+            let has_source = source.is_some();
+            let suffix = h_flex()
+                .w_full()
+                .items_center()
+                .pl(px(5.))
+                .pt(px(4.))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .text_size(px(12.))
+                        .text_color(muted_text)
+                        .when_some(source, |el, source| {
+                            el.child(t!("Source: {source}", source = source))
+                        }),
+                )
+                .child(h_flex().flex_none().gap(px(10.)).children(
+                    self.more_info_message
+                        .iter()
+                        .zip(self.more_info_url.iter())
+                        .map(|(message, url)| {
+                            let url = url.clone();
+                            Button::new(message.clone(), message.clone())
+                                .label_size(LabelSize::Small)
+                                .end_icon(
+                                    Icon::new(IconName::ArrowUpRight)
+                                        .size(IconSize::Indicator)
+                                        .color(Color::Muted),
+                                )
+                                .on_click(cx.listener(move |_, _, _, cx| {
+                                    cx.open_url(&url);
+                                }))
+                        }),
+                )
+                .children(self.primary_message.iter().map(|message| {
+                    action_button(
+                        ("notification-primary", cx.entity_id()).into(),
+                        message.clone(),
+                        self.primary_icon
+                            .map(|icon| (icon, self.primary_icon_color.unwrap_or(Color::Muted))),
+                        true,
+                    )
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        if let Some(on_click) = this.primary_on_click.as_ref() {
+                            (on_click)(window, cx)
+                        };
+                        this.dismiss(cx)
+                    }))
                 }))
                 .children(self.secondary_message.iter().map(|message| {
-                    Button::new(("notification-secondary", cx.entity_id()), message.clone())
-                        .when_some(self.button_style, |button, style| button.style(style))
-                        .label_size(LabelSize::Small)
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            if let Some(on_click) = this.secondary_on_click.as_ref() {
-                                (on_click)(window, cx)
-                            };
-                            this.dismiss(cx)
-                        }))
-                        .when_some(self.secondary_icon, |button, icon| {
-                            let element = Icon::new(icon.name)
-                                .size(IconSize::Small)
-                                .color(self.secondary_icon_color.unwrap_or(Color::Muted));
-                            match icon.position {
-                                IconPosition::Start => button.start_icon(element),
-                                IconPosition::End => button.end_icon(element),
-                            }
-                        })
-                }))
-                .child(
-                    h_flex().w_full().justify_end().children(
-                        self.more_info_message
-                            .iter()
-                            .zip(self.more_info_url.iter())
-                            .map(|(message, url)| {
-                                let url = url.clone();
-                                Button::new(message.clone(), message.clone())
-                                    .label_size(LabelSize::Small)
-                                    .end_icon(
-                                        Icon::new(IconName::ArrowUpRight)
-                                            .size(IconSize::Indicator)
-                                            .color(Color::Muted),
-                                    )
-                                    .on_click(cx.listener(move |_, _, _, cx| {
-                                        cx.open_url(&url);
-                                    }))
-                            }),
-                    ),
-                );
+                    action_button(
+                        ("notification-secondary", cx.entity_id()).into(),
+                        message.clone(),
+                        self.secondary_icon.map(|icon| {
+                            (icon, self.secondary_icon_color.unwrap_or(Color::Muted))
+                        }),
+                        false,
+                    )
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        if let Some(on_click) = this.secondary_on_click.as_ref() {
+                            (on_click)(window, cx)
+                        };
+                        this.dismiss(cx)
+                    }))
+                })));
 
             // Wrap the icon to vertically align with the first line of the primary
             // message (mirrors `ui::Callout`'s alignment pattern). The body, secondary
             // text and suffix all share a single column to the right of the icon so
             // they line up under one another even when an icon is present.
-            let body = h_flex()
-                .gap_2()
+            let message = div()
+                .id("message-notification-content")
+                .w_full()
+                .min_w_0()
+                .when(!expanded, |el| el.truncate())
+                .when(expanded, |el| {
+                    el.max_h(vh(0.6, window))
+                        .overflow_y_scroll()
+                        .track_scroll(&self.scroll_handle.clone())
+                })
+                .child(main_content);
+
+            let message_column = v_flex()
+                .flex_1()
+                .min_w_0()
+                .when_some(self.title.clone(), |el, title| el.child(Label::new(title)))
+                .child(message)
+                .when_some(self.secondary_content.clone(), |el, secondary| {
+                    el.child(
+                        Label::new(secondary)
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                    )
+                });
+
+            let main_row = h_flex()
+                .w_full()
                 .items_start()
+                .min_h(px(22.))
                 .when_some(
                     self.content_icon.zip(self.content_icon_color),
                     |el, (icon, color)| {
                         el.child(
-                            h_flex()
-                                .h(line_height)
+                            div()
+                                .flex_none()
+                                .flex()
+                                .items_center()
                                 .justify_center()
-                                .child(Icon::new(icon).size(IconSize::Small).color(color)),
+                                .h(px(22.))
+                                .w(px(16.))
+                                .mx(px(4.))
+                                .child(Icon::new(icon).size(IconSize::Medium).color(color)),
                         )
                     },
                 )
-                .child(
-                    v_flex()
-                        .flex_1()
-                        .min_w_0()
-                        .gap_2()
-                        .child(
-                            v_flex()
-                                .gap_1()
-                                .child(
-                                    div()
-                                        .child(
-                                            div()
-                                                .id("message-notification-content")
-                                                .max_h(vh(0.6, window))
-                                                .overflow_y_scroll()
-                                                .track_scroll(&self.scroll_handle.clone())
-                                                .child(main_content),
-                                        )
-                                        .vertical_scrollbar_for(&self.scroll_handle, window, cx),
-                                )
-                                .when_some(self.secondary_content.clone(), |el, secondary| {
-                                    el.child(
-                                        Label::new(secondary)
-                                            .size(LabelSize::Small)
-                                            .color(Color::Muted),
-                                    )
-                                }),
-                        )
-                        .when(has_suffix, |this| this.child(suffix)),
-                );
+                .child(message_column)
+                .child(header_actions);
 
             div()
                 .id("message-notification-wrapper")
                 .opacity(opacity)
+                .w_full()
                 .child(
                     v_flex()
                         .id(("notification-frame", entity))
-                        .occlude()
+                        .block_mouse_except_scroll()
+                        .w_full()
                         .when(has_auto_hide, |this| {
                             this.on_hover(cx.listener(|this, hovered: &bool, _window, cx| {
                                 this.on_hover_changed(*hovered, cx);
@@ -1168,26 +1436,17 @@ pub mod simple_message_notification {
                         .when(show_close_button, |this| {
                             this.on_modifiers_changed(move |_, _, cx| cx.notify(entity))
                         })
-                        .p_3()
-                        .gap_2()
-                        .elevation_3(cx)
-                        .child(
-                            h_flex()
-                                .gap_4()
-                                .justify_between()
-                                .items_start()
-                                .child(
-                                    v_flex()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .gap_0p5()
-                                        .when_some(self.title.clone(), |div, title| {
-                                            div.child(Label::new(title))
-                                        })
-                                        .child(div().max_w_96().child(body)),
-                                )
-                                .child(header_actions),
-                        ),
+                        .py(px(10.))
+                        .px(px(5.))
+                        .bg(frame_background)
+                        .border_1()
+                        .border_color(frame_border)
+                        .rounded(px(4.))
+                        .shadow_lg()
+                        .child(main_row)
+                        .when((has_suffix || has_source) && expanded, |this| {
+                            this.child(suffix)
+                        }),
                 )
         }
     }

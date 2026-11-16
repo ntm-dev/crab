@@ -167,7 +167,9 @@ actions!(
     dev,
     [
         /// Show an error on the workspace level.
-        ShowWorkspaceError
+        ShowWorkspaceError,
+        /// Show a batch of varied notifications to exercise the notification center.
+        ShowManyNotifications
     ]
 );
 
@@ -499,6 +501,10 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
         let line_ending_indicator =
             cx.new(|_| line_ending_selector::LineEndingIndicator::default());
         let indent_indicator = cx.new(|_| line_ending_selector::IndentIndicator::default());
+        let zoom_status = cx.new(|_| workspace::ZoomStatus::default());
+        let workspace_entity = cx.entity();
+        let notifications_status =
+            cx.new(|cx| workspace::NotificationsStatus::new(workspace_entity, cx));
         let git_blame_status = cx.new(|_| git_ui::GitBlameStatus::default());
         let git_branch_status = cx.new(|cx| title_bar::GitBranchStatus::new(workspace, cx));
         workspace.status_bar().update(cx, |status_bar, cx| {
@@ -507,12 +513,14 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
             status_bar.add_left_item(diagnostic_summary, window, cx);
             status_bar.add_left_item(active_file_name, window, cx);
             status_bar.add_left_item(activity_indicator, window, cx);
+            status_bar.add_right_item(notifications_status, window, cx);
             status_bar.add_right_item(active_buffer_language, window, cx);
             status_bar.add_right_item(active_toolchain_language, window, cx);
             status_bar.add_right_item(line_ending_indicator, window, cx);
             status_bar.add_right_item(active_buffer_encoding, window, cx);
             status_bar.add_right_item(indent_indicator, window, cx);
             status_bar.add_right_item(cursor_position, window, cx);
+            status_bar.add_right_item(zoom_status, window, cx);
             status_bar.add_right_item(git_blame_status, window, cx);
             status_bar.add_right_item(image_info, window, cx);
         });
@@ -666,7 +674,15 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
             add_panel_when_ready(chat_panel, workspace_handle.clone(), cx.clone()),
         );
 
-        workspace_handle.update(cx, |workspace, cx| {
+        workspace_handle.update_in(cx, |workspace, window, cx| {
+            if let (Some(project_panel), Some(outline_panel)) = (
+                workspace.panel::<ProjectPanel>(cx),
+                workspace.panel::<OutlinePanel>(cx),
+            ) {
+                project_panel.update(cx, |panel, cx| {
+                    panel.set_outline_panel(outline_panel, window, cx)
+                });
+            }
             workspace.finish_dock_restoration(cx);
         })?;
 
@@ -926,6 +942,7 @@ fn register_actions(
                     });
                 } else {
                     theme_settings::increase_buffer_font_size(cx);
+                    theme_settings::adjust_ui_font_size(cx, |size| size + px(1.0));
                 }
             }
         })
@@ -943,6 +960,7 @@ fn register_actions(
                     });
                 } else {
                     theme_settings::decrease_buffer_font_size(cx);
+                    theme_settings::adjust_ui_font_size(cx, |size| size - px(1.0));
                 }
             }
         })
@@ -955,6 +973,7 @@ fn register_actions(
                     });
                 } else {
                     theme_settings::reset_buffer_font_size(cx);
+                    theme_settings::reset_ui_font_size(cx);
                 }
             }
         })
@@ -1124,6 +1143,61 @@ fn register_actions(
             }
         });
     }
+
+    #[cfg(debug_assertions)]
+    workspace.register_action(|workspace, _: &ShowManyNotifications, _, cx| {
+        use ui::{Color, IconName};
+
+        let long_message = "A very long notification message that keeps going and going so that it must be collapsed in the center and expanded on demand. ".repeat(12);
+        let multiline_message = "First line of the message\nSecond line of the message\r\nThird line".to_string();
+        let huge_message = "x".repeat(1500);
+        let cases: Vec<(String, IconName, Color, bool)> = vec![
+            ("Short info message".to_string(), IconName::Info, Color::Muted, false),
+            ("Short warning message".to_string(), IconName::Warning, Color::Warning, false),
+            ("Short error message".to_string(), IconName::XCircle, Color::Error, false),
+            (long_message, IconName::XCircle, Color::Error, true),
+            (multiline_message, IconName::Info, Color::Muted, false),
+            (huge_message, IconName::Warning, Color::Warning, false),
+            ("Duplicate message".to_string(), IconName::Info, Color::Muted, false),
+            ("Duplicate message".to_string(), IconName::Info, Color::Muted, false),
+            ("Duplicate message".to_string(), IconName::Info, Color::Muted, false),
+            ("Message without icon".to_string(), IconName::Info, Color::Muted, false),
+        ];
+        for (ix, (message, icon, color, with_action)) in cases.into_iter().enumerate() {
+            workspace.show_notification(
+                NotificationId::named(format!("debug-notification-{ix}").into()),
+                cx,
+                |cx| {
+                    cx.new(|cx| {
+                        let mut notification = MessageNotification::new(message, cx)
+                            .content_icon(icon, color);
+                        if ix % 2 == 0 {
+                            notification = notification.with_source("notif-demo");
+                        }
+                        if with_action {
+                            notification
+                                .primary_message("Dismiss")
+                                .secondary_message("Details")
+                        } else {
+                            notification
+                        }
+                    })
+                },
+            );
+        }
+        for ix in 0..12 {
+            workspace.show_notification(
+                NotificationId::named(format!("debug-notification-flood-{ix}").into()),
+                cx,
+                |cx| {
+                    cx.new(|cx| {
+                        MessageNotification::new(format!("Flood notification number {ix}"), cx)
+                            .content_icon(IconName::Info, Color::Muted)
+                    })
+                },
+            );
+        }
+    });
 
     #[cfg(debug_assertions)]
     workspace.register_action(|workspace, _: &ShowWorkspaceError, _, cx| {

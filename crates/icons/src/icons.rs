@@ -57,6 +57,7 @@ pub enum IconName {
     AudioOff,
     Backspace,
     Bell,
+    BellOff,
     Binary,
     Bitbucket,
     Blocks,
@@ -77,6 +78,7 @@ pub enum IconName {
     ChevronUpDown,
     Circle,
     CircleHelp,
+    ClearAll,
     Clock,
     Close,
     CloudDownload,
@@ -246,6 +248,8 @@ pub enum IconName {
     Warning,
     Crab,
     WholeWord,
+    ZoomIn,
+    ZoomOut,
     XCircle,
 }
 

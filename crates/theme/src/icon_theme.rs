@@ -432,9 +432,19 @@ pub const SYMBOLS_ICON_THEME_NAME: &str = "Symbols Dark";
 /// The name of the bundled icon theme the default settings use in light mode.
 pub const SYMBOLS_ICON_THEME_LIGHT_NAME: &str = "Symbols Light";
 
+/// The name of the bundled VSCode Icons theme the default settings use in dark mode.
+pub const VSCODE_ICONS_THEME_NAME: &str = "VSCode Icons for Zed (Dark)";
+
+/// The name of the bundled VSCode Icons theme the default settings use in light mode.
+pub const VSCODE_ICONS_THEME_LIGHT_NAME: &str = "VSCode Icons for Zed (Light)";
+
 /// The names of every icon theme that ships with Crab.
-pub const BUNDLED_ICON_THEME_NAMES: &[&str] =
-    &[SYMBOLS_ICON_THEME_NAME, SYMBOLS_ICON_THEME_LIGHT_NAME];
+pub const BUNDLED_ICON_THEME_NAMES: &[&str] = &[
+    SYMBOLS_ICON_THEME_NAME,
+    SYMBOLS_ICON_THEME_LIGHT_NAME,
+    VSCODE_ICONS_THEME_NAME,
+    VSCODE_ICONS_THEME_LIGHT_NAME,
+];
 
 static DEFAULT_ICON_THEME: LazyLock<Arc<IconTheme>> = LazyLock::new(|| {
     Arc::new(IconTheme {

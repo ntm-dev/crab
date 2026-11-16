@@ -19,7 +19,9 @@ pub mod path_link;
 mod persistence;
 pub mod searchable;
 pub mod security_modal;
+mod notifications_status;
 mod status_bar;
+mod zoom_status;
 pub mod tasks;
 mod theme_preview;
 mod toast_layer;
@@ -120,6 +122,8 @@ use sqlez::{
 };
 use status_bar::StatusBar;
 pub use status_bar::{HideStatusItem, StatusItemView, add_hide_button_entry};
+pub use notifications_status::NotificationsStatus;
+pub use zoom_status::ZoomStatus;
 use std::{
     any::TypeId,
     borrow::Cow,
@@ -6192,23 +6196,32 @@ impl Workspace {
     }
 
     fn render_notifications(&self, _window: &mut Window, _cx: &mut Context<Self>) -> Option<Div> {
-        if self.notifications.is_empty() {
+        if self.notifications.is_empty()
+            || self.notifications.center_visible
+            || self.notifications.do_not_disturb
+        {
             None
         } else {
             Some(
                 div()
                     .absolute()
-                    .right_3()
-                    .bottom_3()
-                    .w_112()
+                    .right(px(7.))
+                    .bottom(px(7.))
+                    .w(px(450.))
                     .h_full()
                     .flex()
                     .flex_col()
                     .justify_end()
-                    .gap_2()
+                    .gap(px(8.))
                     .children(
                         self.notifications
                             .iter()
+                            .filter(|(id, _)| !self.notifications.toast_hidden.contains(id))
+                            .rev()
+                            .take(notifications::MAX_VISIBLE_TOASTS)
+                            .collect::<Vec<_>>()
+                            .into_iter()
+                            .rev()
                             .map(|(_, notification)| notification.clone().into_any_element()),
                     ),
             )

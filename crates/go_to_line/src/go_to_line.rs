@@ -334,7 +334,7 @@ impl Render for GoToLine {
         };
 
         v_flex()
-            .w(rems(24.))
+            .w(picker::DEFAULT_MODAL_WIDTH)
             .elevation_2(cx)
             .key_context("GoToLine")
             .on_action(cx.listener(Self::cancel))

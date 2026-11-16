@@ -13,9 +13,14 @@ use crate::{
     default_icon_theme,
 };
 
-const BUNDLED_ICON_THEME_PATHS: &[&str] = &[
-    "icon_themes/symbols/icon_theme.json",
-    "icon_themes/seti/icon_theme.json",
+/// Each bundled icon theme file, with the directory its relative icon paths are resolved against.
+const BUNDLED_ICON_THEME_PATHS: &[(&str, &str)] = &[
+    ("icon_themes/symbols/icon_theme.json", ""),
+    ("icon_themes/seti/icon_theme.json", ""),
+    (
+        "icon_themes/vscode_icons/icon_theme.json",
+        "icon_themes/vscode_icons",
+    ),
 ];
 
 /// The metadata for a theme.
@@ -134,12 +139,12 @@ impl ThemeRegistry {
     }
 
     fn load_bundled_icon_themes(&self) -> Result<()> {
-        for path in BUNDLED_ICON_THEME_PATHS {
+        for (path, icons_root_dir) in BUNDLED_ICON_THEME_PATHS {
             let Some(bytes) = self.assets.load(path)? else {
                 continue;
             };
             let family: IconThemeFamilyContent = serde_json::from_slice(&bytes)?;
-            self.load_icon_theme(family, Path::new(""))?;
+            self.load_icon_theme(family, Path::new(icons_root_dir))?;
         }
         Ok(())
     }
@@ -311,8 +316,10 @@ impl ThemeRegistry {
         icons_root_dir: &Path,
     ) -> Result<()> {
         let resolve_icon_path = |path: SharedString| {
+            // Icon themes written for extensions reference icons as `./icons/foo.svg`;
+            // asset lookups need the plain path without the leading `./`.
             icons_root_dir
-                .join(path.as_ref())
+                .join(path.as_ref().trim_start_matches("./"))
                 .to_string_lossy()
                 .to_string()
                 .into()

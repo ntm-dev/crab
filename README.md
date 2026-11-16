@@ -5,7 +5,7 @@
 ---
 
 <div align="center">
-  <img src="assets/images/crab_logo_mark.svg" alt="Crab" width="128">
+  <img src="assets/images/crab_logo.svg" alt="Crab" width="128">
   <h1>Crab</h1>
   <p>The fast, native code editor and agent workspace.</p>
   <p>Written in Rust. Batteries included.</p>

@@ -31,4 +31,9 @@ All notable user-facing changes to Crab are listed here, newest first.
 - Support for Intel Macs, and smaller downloads on macOS, Linux and Windows.
 - Bracket pair colorization is on by default, and Quick open and the command palette open near the top of the window.
 - Syntax highlighting for XML and SVG files.
+- Panda Crab theme with the Panda Syntax terminal colors is now the default, together with VSCode Icons and VS Code key bindings.
+- Notification center follows VS Code: toasts stack up to three at a time and disappear after a few seconds while staying in the center, duplicates are merged, long messages collapse, and the bell offers Clear All and Do Not Disturb. Notifications show their source and have a copy button.
+- Status bar gains a zoom indicator, a bell for notifications, and a "Select Indentation" menu to change, detect and convert indentation.
+- Zoom now scales the interface as well as the editor.
+- Explorer shows the Outline section, folder colors that reflect the git status of their contents, and VS Code-style header buttons.
 - Many fixes to agent chat, the Windows installer, scrolling and theme colors.

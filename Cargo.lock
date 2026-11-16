@@ -4736,6 +4736,7 @@ dependencies = [
  "language",
  "menu",
  "multi_buffer",
+ "picker",
  "project",
  "rope",
  "serde_json",
@@ -6639,6 +6640,7 @@ dependencies = [
  "language",
  "picker",
  "project",
+ "settings",
  "ui",
  "workspace",
 ]
@@ -9619,6 +9621,7 @@ dependencies = [
  "markdown_preview",
  "menu",
  "notifications",
+ "outline_panel",
  "pretty_assertions",
  "project",
  "rayon",

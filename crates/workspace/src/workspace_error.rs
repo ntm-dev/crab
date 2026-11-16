@@ -16,8 +16,8 @@ impl ErrorSeverity {
     pub fn auto_dismiss_delay(&self) -> Option<Duration> {
         match self {
             ErrorSeverity::Critical => None,
-            ErrorSeverity::Error => Some(Duration::from_secs(30)),
-            ErrorSeverity::Warning => Some(Duration::from_secs(20)),
+            ErrorSeverity::Error => Some(Duration::from_secs(15)),
+            ErrorSeverity::Warning => Some(Duration::from_secs(12)),
         }
     }
 }

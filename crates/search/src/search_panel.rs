@@ -1221,7 +1221,7 @@ impl SearchPanel {
                     .flex_none()
                     .child(action_button(
                         "search-panel-refresh",
-                        IconName::ArrowCircle,
+                        IconName::RotateCw,
                         n!("Refresh"),
                         &RefreshResults,
                         has_query,
@@ -1235,14 +1235,14 @@ impl SearchPanel {
                     ))
                     .child(action_button(
                         "search-panel-collapse-all",
-                        IconName::ListCollapse,
+                        IconName::CollapseAll,
                         n!("Collapse All"),
                         &CollapseAllEntries,
                         has_results,
                     ))
                     .child(action_button(
                         "search-panel-open-in-editor",
-                        IconName::FileDiff,
+                        IconName::NewFile,
                         n!("Open in Editor"),
                         &OpenInEditor,
                         has_results,

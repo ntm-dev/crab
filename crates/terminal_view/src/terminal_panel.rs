@@ -198,7 +198,11 @@ impl TerminalPanel {
             maximized_from: None,
             show_problems: false,
             problems_view: None,
-            hidden_tabs: HashSet::default(),
+            hidden_tabs: HashSet::from_iter([
+                PanelTab::Output,
+                PanelTab::Ports,
+                PanelTab::DebugConsole,
+            ]),
             show_tab_icons: false,
         };
         cx.subscribe(project, |_, _, event, cx| {
@@ -1769,7 +1773,7 @@ impl TerminalPanel {
                 .group(group_name.clone())
                 .relative()
                 .w_full()
-                .h(px(22.))
+                .h(ui::scaled_px(22.))
                 .flex_none()
                 .px(px(10.))
                 .gap_1p5()
@@ -1922,7 +1926,7 @@ impl TerminalPanel {
 
         v_flex()
             .h_full()
-            .w(px(120.))
+            .w(ui::scaled_px(120.))
             .flex_none()
             .border_l_1()
             .border_color(colors.border)
@@ -2022,7 +2026,7 @@ impl TerminalPanel {
             .flatten();
         h_flex()
             .w_full()
-            .h(px(32.))
+            .h(ui::scaled_px(32.))
             .flex_none()
             .pl(px(4.))
             .pr(px(4.))
@@ -2039,9 +2043,9 @@ impl TerminalPanel {
                             .h_full()
                             .flex()
                             .items_center()
-                            .px(px(10.))
+                            .px(ui::scaled_px(10.))
                             .cursor_pointer()
-                            .text_size(px(13.))
+                            .text_size(ui::scaled_px(13.))
                             .when(hidden_tabs.contains(&PanelTab::Terminal), |tab| tab.hidden())
                             .map(|tab| {
                                 if showing_problems {
@@ -2065,9 +2069,9 @@ impl TerminalPanel {
                             .h_full()
                             .flex()
                             .items_center()
-                            .px(px(10.))
+                            .px(ui::scaled_px(10.))
                             .cursor_pointer()
-                            .text_size(px(13.))
+                            .text_size(ui::scaled_px(13.))
                             .when(hidden_tabs.contains(&PanelTab::Problems), |tab| tab.hidden())
                             .map(|tab| {
                                 if showing_problems {
@@ -2088,12 +2092,12 @@ impl TerminalPanel {
                                     div()
                                         .ml(px(6.))
                                         .px(px(5.))
-                                        .h(px(16.))
+                                        .h(ui::scaled_px(16.))
                                         .rounded(px(10.))
                                         .flex()
                                         .items_center()
                                         .justify_center()
-                                        .text_size(px(10.))
+                                        .text_size(ui::scaled_px(10.))
                                         .bg(colors.tab_active_foreground)
                                         .text_color(colors.title_bar_background)
                                         .child(format_problem_count(problem_count)),
@@ -2107,9 +2111,9 @@ impl TerminalPanel {
                             .flex()
                             .when(hidden_tabs.contains(&PanelTab::Output), |tab| tab.hidden())
                             .items_center()
-                            .px(px(10.))
+                            .px(ui::scaled_px(10.))
                             .cursor_pointer()
-                            .text_size(px(13.))
+                            .text_size(ui::scaled_px(13.))
                             .text_color(colors.text_muted)
                             .hover(|style| style.text_color(colors.text))
                             .on_click(|_, window, cx| {
@@ -2124,9 +2128,9 @@ impl TerminalPanel {
                             .flex()
                             .when(hidden_tabs.contains(&PanelTab::Ports), |tab| tab.hidden())
                             .items_center()
-                            .px(px(10.))
+                            .px(ui::scaled_px(10.))
                             .cursor_pointer()
-                            .text_size(px(13.))
+                            .text_size(ui::scaled_px(13.))
                             .text_color(colors.text_muted)
                             .hover(|style| style.text_color(colors.text))
                             .tooltip(Tooltip::text(t!("Incoming")))
@@ -2155,9 +2159,9 @@ impl TerminalPanel {
                             .flex()
                             .when(hidden_tabs.contains(&PanelTab::DebugConsole), |tab| tab.hidden())
                             .items_center()
-                            .px(px(10.))
+                            .px(ui::scaled_px(10.))
                             .cursor_pointer()
-                            .text_size(px(13.))
+                            .text_size(ui::scaled_px(13.))
                             .text_color(colors.text_muted)
                             .hover(|style| style.text_color(colors.text))
                             .on_click(|_, window, cx| {
@@ -2396,7 +2400,7 @@ impl Render for TerminalPanel {
             .map(|view| {
                 div()
                     .absolute()
-                    .top(px(32.))
+                    .top(ui::scaled_px(32.))
                     .left_0()
                     .right_0()
                     .bottom_0()

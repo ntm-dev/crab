@@ -43,6 +43,10 @@
     "description": "Hiển thị trạng thái gỡ lỗi của hàng đợi tác vụ Git của kho lưu trữ hiện tại.",
     "name": "Hiện hàng đợi tác vụ Git"
   },
+  "dev::ShowManyNotifications": {
+    "description": "Hiển thị nhiều thông báo khác nhau để kiểm tra trung tâm thông báo.",
+    "name": "Hiện nhiều thông báo"
+  },
   "dev::ShowWorkspaceError": {
     "description": "Hiển thị một lỗi ở cấp không gian làm việc.",
     "name": "Hiện lỗi không gian làm việc"

@@ -3,8 +3,9 @@ use smallvec::SmallVec;
 
 use crate::prelude::*;
 
-const TAB_HEIGHT: Pixels = px(28.);
-const TAB_SLOT_SIZE: Pixels = px(18.);
+fn scaled_pixels(cx: &App, value: f32) -> Pixels {
+    theme::theme_settings(cx).ui_font_size(cx) * (value / crate::REFERENCE_UI_FONT_SIZE)
+}
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum TabCloseSide {
@@ -52,12 +53,12 @@ impl Tab {
         self
     }
 
-    pub fn content_height(_cx: &App) -> Pixels {
-        TAB_HEIGHT - px(1.)
+    pub fn content_height(cx: &App) -> Pixels {
+        scaled_pixels(cx, 27.)
     }
 
-    pub fn container_height(_cx: &App) -> Pixels {
-        TAB_HEIGHT
+    pub fn container_height(cx: &App) -> Pixels {
+        scaled_pixels(cx, 28.)
     }
 }
 
@@ -104,7 +105,7 @@ impl RenderOnce for Tab {
         let slot = h_flex()
             .relative()
             .flex_none()
-            .size(TAB_SLOT_SIZE)
+            .size(crate::scaled_px(18.))
             .when_some(self.start_slot, |slot, indicator| {
                 slot.child(
                     slot_layer()
@@ -127,7 +128,11 @@ impl RenderOnce for Tab {
         let selected = self.selected;
         let inner = h_flex()
             .relative()
-            .h(if selected { px(26.) } else { px(24.) })
+            .h(if selected {
+                crate::scaled_px(26.)
+            } else {
+                crate::scaled_px(24.)
+            })
             .flex_1()
             .min_w_0()
             .items_center()
@@ -162,7 +167,7 @@ impl RenderOnce for Tab {
             .group("")
             .flex()
             .flex_none()
-            .h(TAB_HEIGHT)
+            .h(crate::scaled_px(28.))
             .text_color(text_color)
             .cursor_pointer()
             .map(|this| {

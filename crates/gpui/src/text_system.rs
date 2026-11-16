@@ -154,6 +154,18 @@ impl TextSystem {
         if let Ok(font_id) = self.font_id(font) {
             return font_id;
         }
+        if let Some(fallbacks) = &font.fallbacks {
+            for family in fallbacks.fallback_list() {
+                let candidate = Font {
+                    family: family.clone().into(),
+                    fallbacks: None,
+                    ..font.clone()
+                };
+                if let Ok(font_id) = self.font_id(&candidate) {
+                    return font_id;
+                }
+            }
+        }
         for fallback in &self.fallback_font_stack {
             if let Ok(font_id) = self.font_id(fallback) {
                 return font_id;

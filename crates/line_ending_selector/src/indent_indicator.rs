@@ -1,20 +1,22 @@
 use editor::Editor;
-use gpui::{Action as _, App, Entity, FocusHandle, Focusable, SharedString, Subscription};
+use gpui::{App, Entity, SharedString, Subscription, WeakEntity};
 use i18n::t;
 use language::language_settings::LanguageSettings;
-use ui::{ContextMenu, PopoverMenu, Tooltip, prelude::*};
+use ui::{Tooltip, prelude::*};
 use workspace::{StatusItemView, item::ItemHandle};
+
+use crate::IndentSelector;
 
 #[derive(Default)]
 pub struct IndentIndicator {
     label: Option<SharedString>,
-    focus_handle: Option<FocusHandle>,
+    active_editor: Option<WeakEntity<Editor>>,
     _observe_active_editor: Option<Subscription>,
 }
 
 impl IndentIndicator {
     fn update(&mut self, editor: Entity<Editor>, _: &mut Window, cx: &mut Context<Self>) {
-        self.focus_handle = Some(editor.focus_handle(cx));
+        self.active_editor = Some(editor.downgrade());
         self.label = editor.read(cx).active_buffer(cx).map(|buffer| {
             let settings = LanguageSettings::for_buffer(buffer.read(cx), cx);
             let size = settings.tab_size.get();
@@ -29,35 +31,18 @@ impl IndentIndicator {
 }
 
 impl Render for IndentIndicator {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        let focus_handle = self.focus_handle.clone();
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div().when_some(self.label.clone(), |el, label| {
             el.child(
-                PopoverMenu::new("indent-indicator-menu")
-                    .anchor(gpui::Anchor::BottomRight)
-                    .trigger_with_tooltip(
-                        Button::new("indent-indicator", label)
-                            .label_size(LabelSize::Small)
-                            .tab_index(0isize),
-                        Tooltip::text(t!("Select Indentation")),
-                    )
-                    .menu(move |window, cx| {
-                        let focus_handle = focus_handle.clone();
-                        Some(ContextMenu::build(window, cx, move |menu, _, _| {
-                            let menu = match focus_handle {
-                                Some(focus_handle) => menu.context(focus_handle),
-                                None => menu,
-                            };
-                            menu.action(
-                                t!("Convert Indentation to Spaces"),
-                                editor::actions::ConvertIndentationToSpaces.boxed_clone(),
-                            )
-                            .action(
-                                t!("Convert Indentation to Tabs"),
-                                editor::actions::ConvertIndentationToTabs.boxed_clone(),
-                            )
-                        }))
-                    }),
+                Button::new("indent-indicator", label)
+                    .label_size(LabelSize::Small)
+                    .tab_index(0isize)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        if let Some(editor) = this.active_editor.as_ref() {
+                            IndentSelector::toggle(editor, window, cx);
+                        }
+                    }))
+                    .tooltip(Tooltip::text(t!("Select Indentation"))),
             )
         })
     }
@@ -75,6 +60,7 @@ impl StatusItemView for IndentIndicator {
             self.update(editor, window, cx);
         } else {
             self.label = None;
+            self.active_editor = None;
             self._observe_active_editor = None;
         }
         cx.notify();

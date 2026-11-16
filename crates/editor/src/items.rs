@@ -190,7 +190,27 @@ impl Item for Editor {
     }
 
     fn tab_content(&self, params: TabContentParams, _: &Window, cx: &App) -> AnyElement {
-        let label_color = if ItemSettings::get_global(cx).git_status {
+        let problem_color = self
+            .buffer()
+            .read(cx)
+            .as_singleton()
+            .and_then(|buffer| {
+                let path = buffer.read(cx).project_path(cx)?;
+                let summary = self
+                    .project()?
+                    .read(cx)
+                    .diagnostic_summary_for_path(&path, cx);
+                if summary.error_count > 0 {
+                    Some(Color::Error)
+                } else if summary.warning_count > 0 {
+                    Some(Color::Warning)
+                } else {
+                    None
+                }
+            });
+
+        let neutral_color = entry_label_color(params.selected);
+        let git_color = if ItemSettings::get_global(cx).git_status {
             self.buffer()
                 .read(cx)
                 .as_singleton()
@@ -211,9 +231,18 @@ impl Item for Editor {
                         params.selected,
                     ))
                 })
-                .unwrap_or_else(|| entry_label_color(params.selected))
+                .unwrap_or(neutral_color)
         } else {
-            entry_label_color(params.selected)
+            neutral_color
+        };
+        let label_color = if let Some(color) = problem_color {
+            color
+        } else if git_color != neutral_color {
+            git_color
+        } else if params.selected {
+            Color::Custom(cx.theme().colors().tab_active_foreground)
+        } else {
+            neutral_color
         };
 
         let description = params.detail.and_then(|detail| {
