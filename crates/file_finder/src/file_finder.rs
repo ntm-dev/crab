@@ -1406,9 +1406,13 @@ impl FileFinderDelegate {
                 .await
                 .is_some();
 
+            let mut external_match = None;
             if abs_file_exists {
                 project.update(cx, |project, cx| {
-                    if let Some((worktree, relative_path)) = project.find_worktree(query_path, cx) {
+                    let found = project
+                        .find_worktree(query_path, cx)
+                        .filter(|(worktree, _)| !worktree.read(cx).is_single_file());
+                    if let Some((worktree, relative_path)) = found {
                         path_matches.push(ProjectPanelOrdMatch(PathMatch {
                             score: 1.0,
                             positions: Vec::new(),
@@ -1418,6 +1422,20 @@ impl FileFinderDelegate {
                             is_dir: false, // File finder doesn't support directories
                             distance_to_relative_ancestor: usize::MAX,
                         }));
+                    } else if let Some(file_name) = query_path
+                        .file_name()
+                        .and_then(|name| RelPath::from_unix_str(name).ok())
+                    {
+                        external_match = Some(Match::History {
+                            path: FoundPath::new(
+                                ProjectPath {
+                                    worktree_id: WorktreeId::from_usize(usize::MAX),
+                                    path: file_name.into_arc(),
+                                },
+                                query_path.to_path_buf(),
+                            ),
+                            panel_match: None,
+                        });
                     }
                 });
             }
@@ -1427,6 +1445,11 @@ impl FileFinderDelegate {
                     let picker_delegate = &mut picker.delegate;
                     let search_id = util::post_inc(&mut picker_delegate.search_count);
                     picker_delegate.set_search_matches(search_id, false, query, path_matches, cx);
+                    if let Some(external_match) = external_match {
+                        picker_delegate.matches.matches.insert(0, external_match);
+                        picker_delegate.selected_index = 0;
+                        cx.notify();
+                    }
 
                     anyhow::Ok(())
                 })
