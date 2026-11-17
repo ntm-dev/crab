@@ -4,6 +4,8 @@ All notable user-facing changes to Crab are listed here, newest first.
 
 ## Unreleased
 
+## 1.0.1 - 2026-11-17
+
 - New app icon, and a README logo that stays visible on light backgrounds.
 - Title bar gains Customize Layout, Toggle Primary Side Bar and Toggle Panel buttons, with a layout menu like VS Code's.
 - Search, selection controls and editor controls moved next to the split button in the editor tab bar, with the same icon style as the Explorer.
