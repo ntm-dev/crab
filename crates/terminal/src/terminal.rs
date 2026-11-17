@@ -68,7 +68,7 @@ use crate::alacritty::{
     AlacrittyTermConfig, AlacrittyTermLock, HyperlinkMatch, PtySender, RegexSearches,
     append_text_to_term, apply_config, clear_saved_screen, content_text, display_offset,
     display_only_term_config, find_from_terminal_point, full_content_range, last_non_empty_lines,
-    make_content, new_term, open_pty, pty_options, pty_term_config, resize, screen_lines,
+    line_anchor, make_content, new_term, open_pty, pty_options, pty_term_config, resize, screen_lines,
     scroll_display, scroll_to_point, search_matches, selection_text, set_default_cursor_style,
     set_selection as set_term_selection, shrink_to_used, spawn_event_loop,
     toggle_vi_mode as toggle_term_vi_mode, total_lines, update_selection as update_term_selection,
@@ -1066,6 +1066,8 @@ impl TerminalBuilder {
             cwd_history: Vec::new(),
             pending_cwd_boundary: None,
             command_marks: Vec::new(),
+            last_history_size: 0,
+            scrollback_capacity: scrolling_history,
             #[cfg(any(test, feature = "test-support"))]
             input_log: Vec::new(),
             #[cfg(test)]
@@ -1383,6 +1385,8 @@ impl TerminalBuilder {
                 },
                 pending_cwd_boundary: None,
                 command_marks: Vec::new(),
+                last_history_size: 0,
+                scrollback_capacity: scrolling_history,
                 #[cfg(any(test, feature = "test-support"))]
                 input_log: Vec::new(),
                 #[cfg(test)]
@@ -1564,6 +1568,8 @@ pub struct Terminal {
     cwd_history: Vec<CwdHistoryEntry>,
     pending_cwd_boundary: Option<i32>,
     command_marks: Vec<CommandMark>,
+    last_history_size: usize,
+    scrollback_capacity: usize,
     #[cfg(any(test, feature = "test-support"))]
     input_log: Vec<Vec<u8>>,
     #[cfg(test)]
@@ -1758,6 +1764,7 @@ impl Terminal {
                 resize(term, new_bounds);
                 if columns_changed {
                     self.reset_cwd_history();
+                    self.command_marks.clear();
                 }
                 // If there are matches we need to emit a wake up event to
                 // invalidate the matches and recalculate their locations
@@ -2450,6 +2457,17 @@ impl Terminal {
         }
 
         self.last_content = make_content(&terminal, &self.last_content);
+        let history_size = self
+            .last_content
+            .total_lines
+            .saturating_sub(self.last_content.screen_lines);
+        let scrollback_is_full =
+            self.scrollback_capacity > 0 && history_size >= self.scrollback_capacity;
+        if history_size < self.last_history_size || scrollback_is_full {
+            self.command_marks.clear();
+        }
+        self.last_history_size = history_size;
+        self.validate_command_marks(&terminal);
         if self.last_content.grid_lines_change == GridLinesChange::Changed {
             debug_assert!(self.last_content.last_hovered_word.is_none());
             self.refresh_hovered_word(window, cx);
@@ -2967,6 +2985,22 @@ impl Terminal {
         &self.command_marks
     }
 
+    fn validate_command_marks(&mut self, term: &AlacrittyTerm) {
+        let history = i32::try_from(term.history_size()).unwrap_or(i32::MAX);
+        self.command_marks.retain_mut(|mark| {
+            let line = mark.scrollback_position.saturating_sub(history);
+            match (mark.anchor, line_anchor(term, line)) {
+                (Some(expected), Some(actual)) => expected == actual,
+                (Some(_), None) => false,
+                (None, Some(actual)) => {
+                    mark.anchor = Some(actual);
+                    true
+                }
+                (None, None) => true,
+            }
+        });
+    }
+
     fn handle_shell_marker(&mut self, marker: shell_integration::ShellMarker, cx: &mut Context<Self>) {
         match marker {
             shell_integration::ShellMarker::CommandStarted => {
@@ -2990,6 +3024,7 @@ impl Terminal {
                         }
                         CommandStatus::Pending => {
                             mark.scrollback_position = position;
+                            mark.anchor = None;
                             cx.notify();
                             return;
                         }
@@ -2999,6 +3034,7 @@ impl Terminal {
                 self.command_marks.push(CommandMark {
                     scrollback_position: position,
                     status: CommandStatus::Pending,
+                    anchor: None,
                 });
             }
         }
@@ -3041,8 +3077,42 @@ impl Terminal {
         history_size.saturating_add(line)
     }
 
+    fn agent_cli_sequence_title(&self) -> Option<&str> {
+        const AGENT_CLIS: [&str; 5] = ["claude", "codex", "copilot", "gemini", "command-code"];
+        let sequence = self.breadcrumb_text.trim();
+        if sequence.is_empty() {
+            return None;
+        }
+        let TerminalType::Pty { info, .. } = &self.terminal_type else {
+            return None;
+        };
+        let current = info.current.read();
+        let process = current.as_ref()?;
+        let is_agent_cli = std::iter::once(process.name.as_str())
+            .chain(process.argv.iter().take(2).map(String::as_str))
+            .any(|part| {
+                let file_name = std::path::Path::new(part)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or(part)
+                    .to_lowercase();
+                AGENT_CLIS.contains(&file_name.as_str())
+            });
+        is_agent_cli.then_some(sequence)
+    }
+
     pub fn title(&self, truncate: bool) -> String {
         const MAX_CHARS: usize = 25;
+        if self.task.is_none()
+            && self.title_override.is_none()
+            && let Some(sequence) = self.agent_cli_sequence_title()
+        {
+            return if truncate {
+                truncate_and_trailoff(sequence, MAX_CHARS)
+            } else {
+                sequence.to_string()
+            };
+        }
         match &self.task {
             Some(task_state) => {
                 if truncate {
@@ -4041,6 +4111,43 @@ mod tests {
         });
 
         (terminal, window)
+    }
+
+    #[gpui::test]
+    async fn test_command_marks_dropped_when_scrollback_is_cleared(cx: &mut TestAppContext) {
+        let window = cx.add_empty_window();
+        let builder = window.update(|window, cx| {
+            TerminalBuilder::new_display_only(
+                SettingsCursorShape::default(),
+                AlternateScroll::On,
+                None,
+                window.window_handle().window_id().as_u64(),
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+        });
+        let terminal = window.new(|cx| builder.subscribe(cx));
+
+        terminal.update(window, |terminal, cx| {
+            for _ in 0..200 {
+                terminal.write_output(b"output line\r\n", cx);
+            }
+            terminal.write_output(b"\x1b]2;__crab_shell_integration;done;0\x07", cx);
+        });
+        window.run_until_parked();
+        window.update(|window, cx| terminal.update(cx, |terminal, cx| terminal.sync(window, cx)));
+        terminal.read_with(window, |terminal, _| {
+            assert_eq!(terminal.command_marks().len(), 1);
+        });
+
+        terminal.update(window, |terminal, cx| {
+            terminal.write_output(b"\x1b[3J", cx);
+        });
+        window.run_until_parked();
+        window.update(|window, cx| terminal.update(cx, |terminal, cx| terminal.sync(window, cx)));
+        terminal.read_with(window, |terminal, _| {
+            assert!(terminal.command_marks().is_empty());
+        });
     }
 
     fn left_mouse_down_at(

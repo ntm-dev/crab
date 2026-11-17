@@ -5,7 +5,7 @@
 ---
 
 <div align="center">
-  <img src="assets/images/crab_logo.svg" alt="Crab" width="128">
+  <img src="assets/images/crab_logo_badge.svg" alt="Crab" width="128">
   <h1>Crab</h1>
   <p>Trình soạn thảo mã nguồn gốc (native) nhanh và không gian làm việc cho coding agent.</p>
   <p>Viết bằng Rust. Đầy đủ tính năng.</p>

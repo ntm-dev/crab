@@ -14,6 +14,7 @@ pub enum CommandStatus {
 pub struct CommandMark {
     pub scrollback_position: i32,
     pub status: CommandStatus,
+    pub(crate) anchor: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

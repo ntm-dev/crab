@@ -98,6 +98,12 @@ impl Capability {
 
 pub type BufferRow = u32;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct IndentOverride {
+    pub hard_tabs: Option<bool>,
+    pub tab_size: Option<std::num::NonZeroU32>,
+}
+
 /// An in-memory representation of a source code file, including its text,
 /// syntax trees, git status, and diagnostics.
 pub struct Buffer {
@@ -141,6 +147,8 @@ pub struct Buffer {
     has_unsaved_edits: Cell<(clock::Global, bool)>,
     change_bits: Vec<rc::Weak<Cell<bool>>>,
     modeline: Option<Arc<ModelineSettings>>,
+    parsed_modeline: Option<ModelineSettings>,
+    indent_override: IndentOverride,
     _subscriptions: Vec<gpui::Subscription>,
     resolved_settings: Option<Arc<LanguageSettings>>,
     _settings_observer: Option<gpui::Subscription>,
@@ -1188,6 +1196,8 @@ impl Buffer {
             has_conflict: false,
             change_bits: Default::default(),
             modeline: None,
+            parsed_modeline: None,
+            indent_override: IndentOverride::default(),
             _subscriptions: Vec::new(),
             resolved_settings: None,
             _settings_observer: Some(cx.observe_global::<SettingsStore>(|this, cx| {
@@ -1615,12 +1625,40 @@ impl Buffer {
         modeline: Option<ModelineSettings>,
         cx: &mut Context<Self>,
     ) -> bool {
-        if modeline.as_ref() != self.modeline.as_deref() {
-            self.modeline = modeline.map(Arc::new);
+        self.parsed_modeline = modeline;
+        self.apply_effective_modeline(cx)
+    }
+
+    fn apply_effective_modeline(&mut self, cx: &mut Context<Self>) -> bool {
+        let effective = if self.indent_override == IndentOverride::default() {
+            self.parsed_modeline.clone()
+        } else {
+            let mut merged = self.parsed_modeline.clone().unwrap_or_default();
+            if let Some(hard_tabs) = self.indent_override.hard_tabs {
+                merged.hard_tabs = Some(hard_tabs);
+            }
+            if let Some(tab_size) = self.indent_override.tab_size {
+                merged.tab_size = Some(tab_size);
+            }
+            Some(merged)
+        };
+        if effective.as_ref() != self.modeline.as_deref() {
+            self.modeline = effective.map(Arc::new);
             self.refresh_resolved_settings(cx);
             true
         } else {
             false
+        }
+    }
+
+    pub fn indent_override(&self) -> IndentOverride {
+        self.indent_override
+    }
+
+    pub fn set_indent_override(&mut self, indent_override: IndentOverride, cx: &mut Context<Self>) {
+        if indent_override != self.indent_override {
+            self.indent_override = indent_override;
+            self.apply_effective_modeline(cx);
         }
     }
 

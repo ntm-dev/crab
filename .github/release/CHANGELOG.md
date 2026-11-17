@@ -4,6 +4,16 @@ All notable user-facing changes to Crab are listed here, newest first.
 
 ## Unreleased
 
+- New app icon, and a README logo that stays visible on light backgrounds.
+- Title bar gains Customize Layout, Toggle Primary Side Bar and Toggle Panel buttons, with a layout menu like VS Code's.
+- Search, selection controls and editor controls moved next to the split button in the editor tab bar, with the same icon style as the Explorer.
+- Indentation menu follows VS Code: detects indentation when a file opens, picks the tab size from a list, converts the whole file between spaces and tabs, and no longer writes to your settings file.
+- Notification bell is white and shows a dot for unread notifications. Notifications show their source and have a copy button and VS Code-style buttons.
+- Status bar shows a `{}` icon before the language, has more room between items, and shows its items right after a restored split layout opens.
+- Terminal list can be resized by dragging its edge. Right-click a terminal to rename it or change its icon or color.
+- Terminal tab title follows the title set by agent CLIs such as Claude Code, Codex, Copilot and Gemini.
+- Terminal command marks are drawn as sharp icons and no longer get stuck on the wrong line when a program clears the scrollback.
+
 ## 1.0.0 - 2026-11-16
 
 - New Agent Chat panel in the activity bar. Chat with Claude Code, Codex or OpenCode using the CLIs you already have installed and signed in; no API keys needed.

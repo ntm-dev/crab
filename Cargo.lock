@@ -12326,6 +12326,7 @@ dependencies = [
  "language",
  "log",
  "menu",
+ "picker",
  "pretty_assertions",
  "project",
  "regex",

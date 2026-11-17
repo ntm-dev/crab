@@ -1,4 +1,5 @@
 mod indent_indicator;
+mod indent_ops;
 mod indent_selector;
 mod line_ending_indicator;
 pub use indent_indicator::IndentIndicator;

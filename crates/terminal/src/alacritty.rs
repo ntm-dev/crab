@@ -942,6 +942,29 @@ pub(super) fn total_lines(term: &Term<ZedListener>) -> usize {
     term.total_lines()
 }
 
+const LINE_ANCHOR_COLUMNS: usize = 6;
+
+pub(super) fn line_anchor(term: &Term<ZedListener>, line: i32) -> Option<u64> {
+    let history = i32::try_from(term.history_size()).unwrap_or(i32::MAX);
+    let screen = i32::try_from(term.screen_lines()).unwrap_or(i32::MAX);
+    if line < -history || line >= screen {
+        return None;
+    }
+    let row = &term.grid()[Line(line)];
+    let columns = term.grid().columns().min(LINE_ANCHOR_COLUMNS);
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    let mut visible = 0;
+    for index in 0..columns {
+        let character = row[Column(index)].c;
+        if character != ' ' && character != '\0' {
+            visible += 1;
+        }
+        hash ^= u64::from(u32::from(character));
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    (visible > 0).then_some(hash)
+}
+
 pub(super) fn screen_lines(term: &Term<ZedListener>) -> usize {
     term.screen_lines()
 }

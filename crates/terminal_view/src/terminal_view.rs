@@ -1,4 +1,7 @@
 mod persistence;
+mod terminal_choice_picker;
+pub use terminal_choice_picker::{TerminalChoiceKind, TerminalChoiceModal};
+use terminal_choice_picker::ansi_theme_color;
 pub mod terminal_element;
 pub mod terminal_panel;
 mod terminal_path_like_target;
@@ -144,6 +147,8 @@ pub struct TerminalView {
     blinking_terminal_enabled: bool,
     needs_serialize: bool,
     custom_title: Option<String>,
+    custom_icon: Option<IconName>,
+    custom_color: Option<usize>,
     hover: Option<HoverTarget>,
     hover_tooltip_update: Task<()>,
     workspace_id: Option<WorkspaceId>,
@@ -298,6 +303,8 @@ impl TerminalView {
             scroll_handle,
             needs_serialize: false,
             custom_title: None,
+            custom_icon: None,
+            custom_color: None,
             ime_state: None,
             self_handle: cx.entity().downgrade(),
             rename_editor: None,
@@ -437,13 +444,41 @@ impl TerminalView {
         self.rename_editor.is_some()
     }
 
+    pub fn rename_editor(&self) -> Option<Entity<Editor>> {
+        self.rename_editor.clone()
+    }
+
+    pub fn custom_icon(&self) -> Option<IconName> {
+        self.custom_icon
+    }
+
+    pub fn custom_color(&self) -> Option<usize> {
+        self.custom_color
+    }
+
+    pub fn set_custom_icon(&mut self, icon: Option<IconName>, cx: &mut Context<Self>) {
+        if self.custom_icon != icon {
+            self.custom_icon = icon;
+            cx.emit(ItemEvent::UpdateTab);
+            cx.notify();
+        }
+    }
+
+    pub fn set_custom_color(&mut self, color: Option<usize>, cx: &mut Context<Self>) {
+        if self.custom_color != color {
+            self.custom_color = color;
+            cx.emit(ItemEvent::UpdateTab);
+            cx.notify();
+        }
+    }
+
     pub fn rename_editor_is_focused(&self, window: &Window, cx: &App) -> bool {
         self.rename_editor
             .as_ref()
             .is_some_and(|editor| editor.focus_handle(cx).is_focused(window))
     }
 
-    fn finish_renaming(&mut self, save: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn finish_renaming(&mut self, save: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(editor) = self.rename_editor.take() else {
             return;
         };
@@ -1474,7 +1509,13 @@ impl Item for TerminalView {
                     }
                 }
             },
-            None => (IconName::Terminal, Color::Muted, None),
+            None => (
+                self.custom_icon.unwrap_or(IconName::Terminal),
+                self.custom_color
+                    .map(|index| Color::Custom(ansi_theme_color(index, cx)))
+                    .unwrap_or(Color::Muted),
+                None,
+            ),
         };
 
         let self_handle = self.self_handle.clone();

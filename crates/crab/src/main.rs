@@ -244,6 +244,39 @@ fn set_macos_process_name() {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn set_macos_dock_icon() {
+    use cocoa::{
+        base::{id, nil},
+        foundation::{NSAutoreleasePool, NSString},
+    };
+    use objc::{class, msg_send, sel, sel_impl};
+
+    static ICON: &[u8] = include_bytes!("../resources/app-icon@2x.png");
+
+    unsafe {
+        let pool = NSAutoreleasePool::new(nil);
+        let bundle: id = msg_send![class!(NSBundle), mainBundle];
+        let bundle_path: id = msg_send![bundle, bundlePath];
+        let app_suffix = NSString::alloc(nil).init_str(".app");
+        let in_app_bundle: bool = bundle_path != nil && msg_send![bundle_path, hasSuffix: app_suffix];
+        if !in_app_bundle {
+            let data: id = msg_send![
+                class!(NSData),
+                dataWithBytes: ICON.as_ptr() as *const std::ffi::c_void
+                length: ICON.len()
+            ];
+            let image: id = msg_send![class!(NSImage), alloc];
+            let image: id = msg_send![image, initWithData: data];
+            if image != nil {
+                let app: id = msg_send![class!(NSApplication), sharedApplication];
+                let _: () = msg_send![app, setApplicationIconImage: image];
+            }
+        }
+        let _: () = msg_send![pool, drain];
+    }
+}
+
 fn main() {
     #[cfg(unix)]
     util::prevent_root_execution();
@@ -489,6 +522,9 @@ fn main() {
     });
 
     app.run(move |cx| {
+        #[cfg(target_os = "macos")]
+        set_macos_dock_icon();
+
         cx.set_global(app_db);
         let db_trusted_paths = match workspace::WorkspaceDb::global(cx).fetch_trusted_worktrees() {
             Ok(trusted_paths) => trusted_paths,

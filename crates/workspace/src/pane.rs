@@ -431,6 +431,8 @@ pub struct Pane {
     render_tab_bar: Rc<dyn Fn(&mut Pane, &mut Window, &mut Context<Pane>) -> AnyElement>,
     render_trailing_tab_button:
         Rc<dyn Fn(&mut Pane, &mut Window, &mut Context<Pane>) -> Option<AnyElement>>,
+    render_tab_bar_leading_buttons:
+        Option<Rc<dyn Fn(&mut Pane, &mut Window, &mut Context<Pane>) -> Option<AnyElement>>>,
     show_tab_bar_buttons: bool,
     max_tabs: Option<NonZeroUsize>,
     use_max_tabs: bool,
@@ -611,6 +613,7 @@ impl Pane {
             render_tab_bar_buttons: Rc::new(default_render_tab_bar_buttons),
             render_tab_bar: Rc::new(Self::render_tab_bar),
             render_trailing_tab_button: Rc::new(default_render_trailing_tab_button),
+            render_tab_bar_leading_buttons: None,
             show_tab_bar_buttons: TabBarSettings::get_global(cx).show_tab_bar_buttons,
             display_nav_history_buttons: Some(
                 TabBarSettings::get_global(cx).show_nav_history_buttons,
@@ -888,6 +891,14 @@ impl Pane {
             ) -> (Option<AnyElement>, Option<AnyElement>),
     {
         self.render_tab_bar_buttons = Rc::new(render);
+        cx.notify();
+    }
+
+    pub fn set_render_tab_bar_leading_buttons<F>(&mut self, cx: &mut Context<Self>, render: F)
+    where
+        F: 'static + Fn(&mut Pane, &mut Window, &mut Context<Pane>) -> Option<AnyElement>,
+    {
+        self.render_tab_bar_leading_buttons = Some(Rc::new(render));
         cx.notify();
     }
 
@@ -4410,9 +4421,10 @@ fn default_render_tab_bar_buttons(
     window: &mut Window,
     cx: &mut Context<Pane>,
 ) -> (Option<AnyElement>, Option<AnyElement>) {
-    if !pane.has_focus(window, cx) && !pane.context_menu_focused(window, cx) {
-        return (None, None);
-    }
+    let leading_buttons = pane
+        .render_tab_bar_leading_buttons
+        .clone()
+        .and_then(|render| render(pane, window, cx));
     let (can_clone, can_split_move) = match pane.active_item() {
         Some(active_item) if active_item.can_split(cx) => (true, false),
         Some(_) => (false, pane.items_len() > 1),
@@ -4421,13 +4433,15 @@ fn default_render_tab_bar_buttons(
     // Ideally we would return a vec of elements here to pass directly to the [TabBar]'s
     // `end_slot`, but due to needing a view here that isn't possible.
     let right_children = h_flex()
-        // Instead we need to replicate the spacing from the [TabBar]'s `end_slot` here.
-        .gap(DynamicSpacing::Base04.rems(cx))
+        .gap_0()
+        .children(leading_buttons)
         .child(
             PopoverMenu::new("pane-tab-bar-split")
                 .trigger_with_tooltip(
                     IconButton::new("split", IconName::Split)
-                        .icon_size(IconSize::Small)
+                        .icon_size(IconSize::Custom(rems(16. / 13.)))
+                        .width(ui::scaled_px(22.))
+                        .height(ui::scaled_px(22.).into())
                         .disabled(!can_clone && !can_split_move),
                     Tooltip::text(t!("Split Pane")),
                 )

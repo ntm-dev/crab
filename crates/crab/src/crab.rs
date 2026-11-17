@@ -1246,6 +1246,12 @@ fn initialize_pane(
     cx: &mut Context<Workspace>,
 ) {
     pane.update(cx, |pane, cx| {
+        pane.set_render_tab_bar_leading_buttons(cx, |pane, _, cx| {
+            pane.toolbar()
+                .read(cx)
+                .item_of_type::<QuickActionBar>()
+                .map(|quick_action_bar| quick_action_bar.into_any_element())
+        });
         pane.toolbar().update(cx, |toolbar, cx| {
             let multibuffer_hint = cx.new(|_| MultibufferHint::new());
             toolbar.add_item(multibuffer_hint, window, cx);

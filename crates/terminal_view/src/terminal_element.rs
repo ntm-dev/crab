@@ -1590,8 +1590,12 @@ impl Element for TerminalElement {
                         .saturating_sub(terminal.last_content.screen_lines)
                         as i32;
                     let screen_lines = terminal.last_content.screen_lines as i32;
-                    terminal
-                        .command_marks()
+                    let marks = if terminal.last_content.mode.contains(Modes::ALT_SCREEN) {
+                        &[][..]
+                    } else {
+                        terminal.command_marks()
+                    };
+                    marks
                         .iter()
                         .filter_map(|mark| {
                             let row = mark.scrollback_position - history_size + display_offset as i32;
@@ -1702,75 +1706,38 @@ impl Element for TerminalElement {
                     }
 
                     let gutter_width = layout.dimensions.bounds.origin.x - bounds.origin.x;
-                    let dot_size = px(7.);
-                    let dot_x = bounds.origin.x + (gutter_width - dot_size) / 2.0;
+                    let icon_size = px(16.);
+                    let icon_x = bounds.origin.x + (gutter_width - icon_size) / 2.0;
+                    let success: Hsla = gpui::rgb(0x1b81a8).into();
+                    let failure: Hsla = gpui::rgb(0xf14c4c).into();
+                    let idle: Hsla = gpui::rgba(0xcccccc80).into();
                     for (row, status) in &layout.command_dots {
-                        let dot_y = origin.y
+                        let icon_y = origin.y
                             + *row as f32 * layout.dimensions.line_height
-                            + (layout.dimensions.line_height - dot_size) / 2.0;
-                        let dot_bounds =
-                            Bounds::new(point(dot_x, dot_y), size(dot_size, dot_size));
-                        let radius = dot_size / 2.0;
-                        let success: Hsla = gpui::rgb(0x1b81a8).into();
-                        let failure: Hsla = gpui::rgb(0xf14c4c).into();
-                        let idle: Hsla = gpui::rgba(0xcccccc80).into();
-                        match status {
+                            + (layout.dimensions.line_height - icon_size) / 2.0;
+                        let icon_bounds =
+                            Bounds::new(point(icon_x, icon_y), size(icon_size, icon_size));
+                        let (icon, color) = match status {
                             CommandStatus::Success => {
-                                window.paint_quad(gpui::quad(
-                                    dot_bounds,
-                                    radius,
-                                    success,
-                                    px(0.),
-                                    success,
-                                    gpui::BorderStyle::default(),
-                                ));
+                                (ui::IconName::TerminalDecorationSuccess, success)
                             }
                             CommandStatus::Failed(_) => {
-                                window.paint_quad(gpui::quad(
-                                    dot_bounds,
-                                    radius,
-                                    gpui::transparent_black(),
-                                    px(1.),
-                                    failure,
-                                    gpui::BorderStyle::default(),
-                                ));
-                                let font_size = px(8.);
-                                let shaped = window.text_system().shape_line(
-                                    "x".into(),
-                                    font_size,
-                                    &[TextRun {
-                                        len: 1,
-                                        font: layout.base_text_style.font(),
-                                        color: failure,
-                                        ..Default::default()
-                                    }],
-                                    None,
-                                );
-                                shaped
-                                    .paint(
-                                        point(
-                                            dot_x + (dot_size - shaped.width) / 2.0,
-                                            dot_y + (dot_size - font_size) / 2.0 - px(1.),
-                                        ),
-                                        font_size,
-                                        gpui::TextAlign::Left,
-                                        None,
-                                        window,
-                                        cx,
-                                    )
-                                    .log_err();
+                                (ui::IconName::TerminalDecorationError, failure)
                             }
                             CommandStatus::Pending | CommandStatus::Running => {
-                                window.paint_quad(gpui::quad(
-                                    dot_bounds,
-                                    radius,
-                                    gpui::transparent_black(),
-                                    px(1.),
-                                    idle,
-                                    gpui::BorderStyle::default(),
-                                ));
+                                (ui::IconName::TerminalDecorationIncomplete, idle)
                             }
-                        }
+                        };
+                        window
+                            .paint_svg(
+                                icon_bounds,
+                                icon.path().into(),
+                                None,
+                                Default::default(),
+                                color,
+                                cx,
+                            )
+                            .log_err();
                     }
 
                     for (relative_highlighted_range, color) in &layout.relative_highlighted_ranges {

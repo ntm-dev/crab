@@ -5585,6 +5585,9 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.active_pane = pane.clone();
+        self.status_bar.update(cx, |status_bar, cx| {
+            status_bar.set_active_pane(pane, window, cx);
+        });
         self.active_item_path_changed(true, window, cx);
         self.last_active_center_pane = Some(pane.downgrade());
     }

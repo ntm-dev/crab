@@ -29,6 +29,13 @@ use crab_actions::outline::ToggleOutline;
 
 const MAX_CODE_ACTION_MENU_LINES: u32 = 16;
 
+fn tab_bar_icon(button: IconButton) -> IconButton {
+    button
+        .icon_size(IconSize::Custom(rems(16. / 13.)))
+        .width(ui::scaled_px(22.))
+        .height(ui::scaled_px(22.).into())
+}
+
 pub struct QuickActionBar {
     _inlay_hints_enabled_subscription: Option<Subscription>,
     active_item: Option<Box<dyn ItemHandle>>,
@@ -77,11 +84,7 @@ impl QuickActionBar {
     }
 
     fn get_toolbar_item_location(&self) -> ToolbarItemLocation {
-        if self.show && self.active_editor().is_some() {
-            ToolbarItemLocation::PrimaryRight
-        } else {
-            ToolbarItemLocation::Hidden
-        }
+        ToolbarItemLocation::Hidden
     }
 }
 
@@ -154,8 +157,10 @@ impl Render for QuickActionBar {
                 .flatten();
             v_flex()
                 .child(
-                    IconButton::new("toggle_code_actions_icon", IconName::BoltOutlined)
-                        .icon_size(IconSize::Small)
+                    tab_bar_icon(IconButton::new(
+                        "toggle_code_actions_icon",
+                        IconName::BoltOutlined,
+                    ))
                         .style(ButtonStyle::Subtle)
                         .disabled(!has_available_code_actions)
                         .toggle_state(is_deployed)
@@ -214,8 +219,10 @@ impl Render for QuickActionBar {
 
             PopoverMenu::new("editor-selections-dropdown")
                 .trigger_with_tooltip(
-                    IconButton::new("toggle_editor_selections_icon", IconName::CursorIBeam)
-                        .icon_size(IconSize::Small)
+                    tab_bar_icon(IconButton::new(
+                        "toggle_editor_selections_icon",
+                        IconName::CursorIBeam,
+                    ))
                         .style(ButtonStyle::Subtle)
                         .toggle_state(self.toggle_selections_handle.is_deployed()),
                     Tooltip::text(t!("Selection Controls")),
@@ -288,8 +295,10 @@ impl Render for QuickActionBar {
 
             PopoverMenu::new("editor-settings")
                 .trigger_with_tooltip(
-                    IconButton::new("toggle_editor_settings_icon", IconName::Filter)
-                        .icon_size(IconSize::Small)
+                    tab_bar_icon(IconButton::new(
+                        "toggle_editor_settings_icon",
+                        IconName::Filter,
+                    ))
                         .toggle_state(self.toggle_settings_handle.is_deployed()),
                     Tooltip::text(t!("Editor Controls")),
                 )
@@ -597,7 +606,7 @@ impl Render for QuickActionBar {
 
         h_flex()
             .id("quick action bar")
-            .gap(DynamicSpacing::Base01.rems(cx))
+            .gap_0()
             .children(self.render_preview_button(cx))
             .children(search_button)
             .children(code_actions_dropdown)
@@ -646,8 +655,7 @@ impl RenderOnce for QuickActionBarButton {
         let tooltip = self.tooltip.clone();
         let action = self.action.boxed_clone();
 
-        IconButton::new(self.id.clone(), self.icon)
-            .icon_size(IconSize::Small)
+        tab_bar_icon(IconButton::new(self.id.clone(), self.icon))
             .style(ButtonStyle::Subtle)
             .toggle_state(self.toggled)
             .tooltip(move |_window, cx| {

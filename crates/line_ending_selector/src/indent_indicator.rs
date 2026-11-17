@@ -1,21 +1,52 @@
+use std::{collections::HashSet, num::NonZeroU32};
+
 use editor::Editor;
-use gpui::{App, Entity, SharedString, Subscription, WeakEntity};
+use gpui::{App, Entity, EntityId, SharedString, Subscription, WeakEntity};
 use i18n::t;
-use language::language_settings::LanguageSettings;
+use language::{IndentOverride, language_settings::LanguageSettings};
 use ui::{Tooltip, prelude::*};
 use workspace::{StatusItemView, item::ItemHandle};
 
-use crate::IndentSelector;
+use crate::{IndentSelector, indent_ops::guess_indentation, indent_selector::configured_indent};
 
 #[derive(Default)]
 pub struct IndentIndicator {
     label: Option<SharedString>,
     active_editor: Option<WeakEntity<Editor>>,
+    detected_buffers: HashSet<EntityId>,
     _observe_active_editor: Option<Subscription>,
 }
 
 impl IndentIndicator {
+    fn detect_once(&mut self, editor: &Entity<Editor>, cx: &mut Context<Self>) {
+        let Some(buffer) = editor.read(cx).active_buffer(cx) else {
+            return;
+        };
+        if !self.detected_buffers.insert(buffer.entity_id()) {
+            return;
+        }
+        if buffer.read(cx).indent_override() != IndentOverride::default() {
+            return;
+        }
+        let (default_tab_size, default_hard_tabs) = configured_indent(buffer.read(cx), cx);
+        let guessed = guess_indentation(
+            &buffer.read(cx).text(),
+            default_tab_size,
+            !default_hard_tabs,
+        );
+        buffer.update(cx, |buffer, cx| {
+            buffer.set_indent_override(
+                IndentOverride {
+                    hard_tabs: Some(!guessed.insert_spaces),
+                    tab_size: NonZeroU32::new(guessed.tab_size),
+                },
+                cx,
+            );
+        });
+    }
+
     fn update(&mut self, editor: Entity<Editor>, _: &mut Window, cx: &mut Context<Self>) {
+        self.detect_once(&editor, cx);
         self.active_editor = Some(editor.downgrade());
         self.label = editor.read(cx).active_buffer(cx).map(|buffer| {
             let settings = LanguageSettings::for_buffer(buffer.read(cx), cx);

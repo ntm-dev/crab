@@ -45,10 +45,11 @@ impl Render for NotificationsStatus {
         } else {
             t!("{count} New Notifications", count = unseen)
         };
-        let icon = if do_not_disturb {
-            IconName::BellOff
-        } else {
-            IconName::Bell
+        let icon = match (do_not_disturb, unseen > 0) {
+            (false, false) => IconName::Bell,
+            (false, true) => IconName::BellDot,
+            (true, false) => IconName::BellOff,
+            (true, true) => IconName::BellOffDot,
         };
 
         PopoverMenu::new("notifications-status-menu")
@@ -56,10 +57,7 @@ impl Render for NotificationsStatus {
             .trigger_with_tooltip(
                 IconButton::new("notifications-status", icon)
                     .shape(IconButtonShape::Square)
-                    .icon_size(IconSize::Small)
-                    .when(unseen > 0 && !do_not_disturb, |button| {
-                        button.icon_color(Color::Accent)
-                    }),
+                    .icon_size(IconSize::Small),
                 Tooltip::text(tooltip),
             )
             .menu(move |_window, cx| {

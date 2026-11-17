@@ -9,6 +9,8 @@
   "Select Indentation": "Chọn kiểu thụt lề",
   "Select Tab Size for Current File": "Chọn kích thước tab cho tệp hiện tại",
   "Configured Tab Size": "Kích thước tab đã cấu hình",
+  "Current Tab Size": "Kích thước tab hiện tại",
+  "Default Tab Size": "Kích thước tab mặc định",
   "Trim Trailing Whitespace": "Xóa khoảng trắng ở cuối dòng",
   "change view": "đổi chế độ xem",
   "convert file": "chuyển đổi tệp",

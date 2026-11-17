@@ -165,7 +165,7 @@ impl StatusBar {
     fn render_right_tools(&self, cx: &mut Context<Self>) -> impl IntoElement {
         h_flex()
             .flex_shrink_0()
-            .gap_1()
+            .gap(px(8.))
             .overflow_x_hidden()
             .children(
                 self.right_items

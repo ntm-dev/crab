@@ -1,7 +1,7 @@
 use std::{cmp, path::PathBuf, process::ExitStatus, sync::Arc, time::Duration};
 
 use crate::{
-    TerminalView, default_working_directory,
+    TerminalChoiceKind, TerminalChoiceModal, TerminalView, default_working_directory,
     persistence::{
         SerializedItems, SerializedTerminalPanel, deserialize_terminal_panel, serialize_pane_group,
     },
@@ -90,6 +90,7 @@ pub struct TerminalPanel {
     active: bool,
     selected_terminals: Vec<EntityId>,
     selection_anchor: Option<EntityId>,
+    terminal_list_width: Option<Pixels>,
     maximized_from: Option<Pixels>,
     show_problems: bool,
     problems_view: Option<Entity<diagnostics::ProblemsTable>>,
@@ -195,6 +196,7 @@ impl TerminalPanel {
             active: false,
             selected_terminals: Vec::new(),
             selection_anchor: None,
+            terminal_list_width: None,
             maximized_from: None,
             show_problems: false,
             problems_view: None,
@@ -1722,11 +1724,14 @@ impl TerminalPanel {
     /// terminal (across all split panes) plus a small header with new/split/zoom.
     fn render_terminal_list(
         &self,
-        _window: &Window,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let colors = cx.theme().colors().clone();
         let panel = cx.entity().downgrade();
+        let list_width = self
+            .terminal_list_width
+            .unwrap_or_else(|| ui::scaled_px(120.).to_pixels(window.rem_size()));
 
         // Collect every terminal first so split groups can get VS Code's ┌ ├ └ prefixes.
         let mut entries = Vec::new();
@@ -1741,6 +1746,7 @@ impl TerminalPanel {
                     item.item_id(),
                     item.tab_content_text(0, cx),
                     pane_is_active && ix == active_ix,
+                    item.downcast::<TerminalView>(),
                 ));
             }
         }
@@ -1751,7 +1757,24 @@ impl TerminalPanel {
         let has_multi_selection = selected_terminals.len() > 1;
 
         let mut rows = Vec::new();
-        for (row_ix, (pane, ix, item_id, title, selected)) in entries.into_iter().enumerate() {
+        for (row_ix, (pane, ix, item_id, title, selected, terminal_view)) in
+            entries.into_iter().enumerate()
+        {
+            let (row_icon, row_icon_color, rename_editor) = match &terminal_view {
+                Some(terminal_view) => {
+                    let terminal_view = terminal_view.read(cx);
+                    (
+                        terminal_view.custom_icon().unwrap_or(IconName::Terminal),
+                        terminal_view
+                            .custom_color()
+                            .map(|index| crate::ansi_theme_color(index, cx)),
+                        terminal_view.rename_editor(),
+                    )
+                }
+                None => (IconName::Terminal, None, None),
+            };
+            let menu_view = terminal_view.clone();
+            let rename_view = terminal_view.clone();
             let prefix = if !is_split_group || entry_count < 2 {
                 ""
             } else if row_ix == 0 {
@@ -1792,24 +1815,47 @@ impl TerminalPanel {
                 })
                 .hover(|row| row.bg(colors.element_hover))
                 .child(
-                    Icon::new(IconName::Terminal)
+                    Icon::new(row_icon)
                         .size(IconSize::Medium)
-                        .color(if selected {
+                        .color(if let Some(color) = row_icon_color {
+                            Color::Custom(color)
+                        } else if selected {
                             Color::Custom(colors.tab_active_foreground)
                         } else {
                             Color::Default
                         }),
                 )
                 .child(
-                    div().flex_1().min_w_0().overflow_hidden().child(
-                        Label::new(format!("{prefix}{title}"))
-                            .color(if selected {
-                                Color::Custom(colors.tab_active_foreground)
-                            } else {
-                                Color::Default
-                            })
-                            .truncate(),
-                    ),
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .map(|container| match (rename_editor, rename_view) {
+                            (Some(editor), Some(rename_view)) => {
+                                let cancel_view = rename_view.clone();
+                                container
+                                    .child(editor)
+                                    .on_action(move |_: &menu::Confirm, window, cx| {
+                                        rename_view.update(cx, |view, cx| {
+                                            view.finish_renaming(true, window, cx)
+                                        });
+                                    })
+                                    .on_action(move |_: &menu::Cancel, window, cx| {
+                                        cancel_view.update(cx, |view, cx| {
+                                            view.finish_renaming(false, window, cx)
+                                        });
+                                    })
+                            }
+                            _ => container.child(
+                                Label::new(format!("{prefix}{title}"))
+                                    .color(if selected {
+                                        Color::Custom(colors.tab_active_foreground)
+                                    } else {
+                                        Color::Default
+                                    })
+                                    .truncate(),
+                            ),
+                        }),
                 )
                 .child(
                     h_flex()
@@ -1878,6 +1924,7 @@ impl TerminalPanel {
                     .menu(move |window, cx| {
                         let panel = menu_panel.clone();
                         let pane = menu_pane.clone();
+                        let menu_view = menu_view.clone();
                         ContextMenu::build(window, cx, move |menu, _, _| {
                             let join_panel = panel.clone();
                             let unjoin_panel = panel.clone();
@@ -1889,6 +1936,48 @@ impl TerminalPanel {
                                     });
                                     window.dispatch_action(SplitRight::default().boxed_clone(), cx);
                                 }
+                            })
+                            .when_some(menu_view.clone(), |menu, view| {
+                                let rename_view = view.clone();
+                                let icon_view = view.clone();
+                                let color_view = view;
+                                let icon_panel = panel.clone();
+                                let color_panel = panel.clone();
+                                menu.separator()
+                                    .entry(t!("Rename..."), None, move |window, cx| {
+                                        rename_view.update(cx, |view, cx| {
+                                            view.rename_terminal(&Default::default(), window, cx)
+                                        });
+                                    })
+                                    .entry(t!("Change Icon..."), None, move |window, cx| {
+                                        let view = icon_view.clone();
+                                        icon_panel
+                                            .update(cx, |panel, cx| {
+                                                panel.show_terminal_choice(
+                                                    view,
+                                                    TerminalChoiceKind::Icon,
+                                                    window,
+                                                    cx,
+                                                )
+                                            })
+                                            .ok();
+                                    })
+                                    .entry(t!("Change Color..."), None, move |window, cx| {
+                                        let view = color_view.clone();
+                                        color_panel
+                                            .update(cx, |panel, cx| {
+                                                panel.show_terminal_choice(
+                                                    view,
+                                                    TerminalChoiceKind::Color,
+                                                    window,
+                                                    cx,
+                                                )
+                                            })
+                                            .ok();
+                                    })
+                            })
+                            .when(has_multi_selection || is_split_group, |menu| {
+                                menu.separator()
                             })
                             .when(has_multi_selection, |menu| {
                                 menu.entry(t!("Join Terminals"), None, move |window, cx| {
@@ -1924,12 +2013,28 @@ impl TerminalPanel {
             );
         }
 
+        let sash_color = colors.border_focused;
         v_flex()
+            .relative()
             .h_full()
-            .w(ui::scaled_px(120.))
+            .w(list_width)
             .flex_none()
             .border_l_1()
             .border_color(colors.border)
+            .child(
+                div()
+                    .id("terminal-list-resize-handle")
+                    .absolute()
+                    .left(px(-2.))
+                    .top_0()
+                    .bottom_0()
+                    .w(px(4.))
+                    .cursor_col_resize()
+                    .hover(move |style| style.bg(sash_color))
+                    .on_drag(DraggedTerminalList, |dragged, _, _, cx| {
+                        cx.new(|_| dragged.clone())
+                    }),
+            )
             .child(
                 v_flex()
                     .id("terminal-list-rows")
@@ -1938,6 +2043,21 @@ impl TerminalPanel {
                     .overflow_y_scroll()
                     .children(rows),
             )
+    }
+
+    fn show_terminal_choice(
+        &mut self,
+        view: Entity<TerminalView>,
+        kind: TerminalChoiceKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        workspace.update(cx, |workspace, cx| {
+            TerminalChoiceModal::toggle(workspace, view, kind, window, cx)
+        });
     }
 
     fn toggle_maximize(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2297,8 +2417,28 @@ impl TerminalPanel {
     }
 }
 
+#[derive(Clone)]
+struct DraggedTerminalList;
+
+impl Render for DraggedTerminalList {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        gpui::Empty
+    }
+}
+
 impl Render for TerminalPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let list_resize = cx.listener(
+            |panel, event: &gpui::DragMoveEvent<DraggedTerminalList>, window, cx| {
+                let max_width = event.bounds.size.width / 2.;
+                let min_width = ui::scaled_px(46.).to_pixels(window.rem_size());
+                let width = (event.bounds.right() - event.event.position.x)
+                    .max(min_width)
+                    .min(max_width);
+                panel.terminal_list_width = Some(width);
+                cx.notify();
+            },
+        );
         let terminal_list = self.render_terminal_list(window, cx);
         let panel_header = self.render_panel_header(window, cx);
         let panel_header = {
@@ -2452,6 +2592,7 @@ impl Render for TerminalPanel {
                     .track_focus(&self.focus_handle)
                     .size_full()
                     .relative()
+                    .on_drag_move(list_resize)
                     .child(
                         v_flex().size_full().child(panel_header).child(
                             h_flex()

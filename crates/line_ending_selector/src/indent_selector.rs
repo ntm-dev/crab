@@ -1,18 +1,23 @@
-use std::{collections::HashMap, num::NonZeroU32, sync::Arc};
+use std::{num::NonZeroU32, sync::Arc};
 
-use editor::{
-    Editor,
-    actions::{ConvertIndentationToSpaces, ConvertIndentationToTabs},
-};
+use editor::Editor;
 use gpui::{DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Task, WeakEntity};
 use i18n::t;
-use language::{Buffer, Point, language_settings::LanguageSettings};
+use language::{
+    Buffer,
+    language_settings::{AllLanguageSettings, LanguageSettings},
+};
 use picker::{Picker, PickerDelegate};
-use settings::{LanguageSettingsContent, update_settings_file};
+use settings::Settings as _;
 use ui::{ListItem, ListItemSpacing, prelude::*};
 use workspace::{ModalView, Workspace};
 
+use crate::indent_ops::{
+    TextEdit, convert_to_spaces, convert_to_tabs, guess_indentation, trim_trailing_whitespace,
+};
+
 const TAB_SIZES: [u32; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
+const FOCUS_COLOR: u32 = 0x19f9d8;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum IndentAction {
@@ -64,13 +69,30 @@ enum Choice {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+enum SizeTarget {
+    Spaces,
+    Tabs,
+    DisplayOnly,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
     Actions,
-    TabSize,
+    TabSize(SizeTarget),
 }
 
 pub struct IndentSelector {
     picker: Entity<Picker<IndentSelectorDelegate>>,
+}
+
+pub(crate) fn configured_indent(buffer: &Buffer, cx: &App) -> (u32, bool) {
+    let location = buffer.file().map(|file| settings::SettingsLocation {
+        worktree_id: file.worktree_id(cx),
+        path: file.path().as_ref(),
+    });
+    let language = buffer.language().map(|language| language.name());
+    let settings = AllLanguageSettings::get(location, cx).language(location, language.as_ref(), cx);
+    (settings.tab_size.get(), settings.hard_tabs)
 }
 
 impl IndentSelector {
@@ -84,24 +106,29 @@ impl IndentSelector {
         else {
             return;
         };
-        let editor = editor.clone();
         workspace.update(cx, |workspace, cx| {
             let weak_workspace = workspace.weak_handle();
             workspace.toggle_modal(window, cx, move |window, cx| {
-                IndentSelector::new(editor, buffer, weak_workspace, window, cx)
+                IndentSelector::new(buffer, weak_workspace, window, cx)
             });
         })
     }
 
     fn new(
-        editor: WeakEntity<Editor>,
         buffer: Entity<Buffer>,
         workspace: WeakEntity<Workspace>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let delegate =
-            IndentSelectorDelegate::new(cx.entity().downgrade(), editor, buffer, workspace);
+        let configured = configured_indent(buffer.read(cx), cx).0;
+        let uses_tabs = LanguageSettings::for_buffer(buffer.read(cx), cx).hard_tabs;
+        let delegate = IndentSelectorDelegate::new(
+            cx.entity().downgrade(),
+            buffer,
+            workspace,
+            configured,
+            uses_tabs,
+        );
         let picker = cx.new(|cx| Picker::uniform_list(delegate, window, cx));
         Self { picker }
     }
@@ -124,9 +151,9 @@ impl ModalView for IndentSelector {}
 
 pub struct IndentSelectorDelegate {
     selector: WeakEntity<IndentSelector>,
-    editor: WeakEntity<Editor>,
     buffer: Entity<Buffer>,
-    workspace: WeakEntity<Workspace>,
+    _workspace: WeakEntity<Workspace>,
+    configured_tab_size: u32,
     mode: Mode,
     query: String,
     matches: Vec<Choice>,
@@ -136,19 +163,20 @@ pub struct IndentSelectorDelegate {
 impl IndentSelectorDelegate {
     fn new(
         selector: WeakEntity<IndentSelector>,
-        editor: WeakEntity<Editor>,
         buffer: Entity<Buffer>,
         workspace: WeakEntity<Workspace>,
+        configured_tab_size: u32,
+        uses_tabs: bool,
     ) -> Self {
         let mut this = Self {
             selector,
-            editor,
             buffer,
-            workspace,
+            _workspace: workspace,
+            configured_tab_size,
             mode: Mode::Actions,
             query: String::new(),
             matches: Vec::new(),
-            selected_index: 0,
+            selected_index: usize::from(uses_tabs),
         };
         this.refresh_matches();
         this
@@ -158,7 +186,7 @@ impl IndentSelectorDelegate {
         let query = self.query.to_lowercase();
         let all: Vec<Choice> = match self.mode {
             Mode::Actions => IndentAction::ALL.iter().copied().map(Choice::Action).collect(),
-            Mode::TabSize => TAB_SIZES.iter().copied().map(Choice::Size).collect(),
+            Mode::TabSize(_) => TAB_SIZES.iter().copied().map(Choice::Size).collect(),
         };
         self.matches = all
             .into_iter()
@@ -176,92 +204,68 @@ impl IndentSelectorDelegate {
         }
     }
 
-    fn update_language_settings(
+    fn current_tab_size(&self, cx: &App) -> u32 {
+        LanguageSettings::for_buffer(self.buffer.read(cx), cx)
+            .tab_size
+            .get()
+    }
+
+    fn set_indent(
         &self,
+        hard_tabs: Option<bool>,
+        tab_size: Option<u32>,
         cx: &mut Context<Picker<Self>>,
-        update: impl FnOnce(&mut LanguageSettingsContent) + Send + 'static,
     ) {
-        let language = self
-            .buffer
-            .read(cx)
-            .language()
-            .map(|language| language.name().as_ref().to_string());
-        let Some(workspace) = self.workspace.upgrade() else {
-            return;
-        };
-        let fs = workspace.read(cx).app_state().fs.clone();
-        update_settings_file(fs, cx, move |settings, _| {
-            let all_languages = &mut settings.project.all_languages;
-            match language {
-                Some(name) => update(all_languages.languages.0.entry(name).or_default()),
-                None => update(&mut all_languages.defaults),
+        self.buffer.update(cx, |buffer, cx| {
+            let mut indent = buffer.indent_override();
+            if let Some(hard_tabs) = hard_tabs {
+                indent.hard_tabs = Some(hard_tabs);
             }
+            if let Some(tab_size) = tab_size.and_then(NonZeroU32::new) {
+                indent.tab_size = Some(tab_size);
+            }
+            buffer.set_indent_override(indent, cx);
         });
     }
 
-    fn trim_trailing_whitespace(&self, cx: &mut Context<Picker<Self>>) {
+    fn apply_edits(&self, edits: Vec<TextEdit>, cx: &mut Context<Picker<Self>>) {
+        if edits.is_empty() {
+            return;
+        }
         self.buffer.update(cx, |buffer, cx| {
-            let snapshot = buffer.snapshot();
-            let mut edits = Vec::new();
-            for row in 0..=snapshot.max_point().row {
-                let length = snapshot.line_len(row);
-                if length == 0 {
-                    continue;
-                }
-                let line: String = snapshot
-                    .text_for_range(Point::new(row, 0)..Point::new(row, length))
-                    .collect();
-                let trimmed = line.trim_end_matches([' ', '\t']).len() as u32;
-                if trimmed < length {
-                    edits.push((Point::new(row, trimmed)..Point::new(row, length), ""));
-                }
-            }
-            if !edits.is_empty() {
-                buffer.edit(edits, None, cx);
-            }
+            buffer.edit(
+                edits
+                    .into_iter()
+                    .map(|edit| (edit.range, Arc::<str>::from(edit.text))),
+                None,
+                cx,
+            );
         });
     }
 
     fn detect_indentation(&self, cx: &mut Context<Picker<Self>>) {
-        let text = self.buffer.read(cx).text();
-        let mut tab_lines = 0usize;
-        let mut space_lines = 0usize;
-        let mut differences: HashMap<u32, usize> = HashMap::new();
-        let mut previous_spaces = 0u32;
-        for line in text.lines().take(2000) {
-            if line.trim().is_empty() {
-                continue;
-            }
-            if line.starts_with('\t') {
-                tab_lines += 1;
-                continue;
-            }
-            let spaces = line.chars().take_while(|c| *c == ' ').count() as u32;
-            if spaces > 0 {
-                space_lines += 1;
-            }
-            if spaces > previous_spaces {
-                *differences.entry(spaces - previous_spaces).or_default() += 1;
-            }
-            previous_spaces = spaces;
-        }
-        if tab_lines == 0 && space_lines == 0 {
-            return;
-        }
-        if tab_lines > space_lines {
-            self.update_language_settings(cx, |content| content.hard_tabs = Some(true));
-            return;
-        }
-        let size = [2u32, 3, 4, 8]
-            .into_iter()
-            .max_by_key(|size| differences.get(size).copied().unwrap_or(0))
-            .and_then(NonZeroU32::new);
-        self.update_language_settings(cx, move |content| {
-            content.hard_tabs = Some(false);
-            if let Some(size) = size {
-                content.tab_size = Some(size);
-            }
+        let buffer = self.buffer.read(cx);
+        let (default_tab_size, default_hard_tabs) = configured_indent(buffer, cx);
+        let guessed = guess_indentation(&buffer.text(), default_tab_size, !default_hard_tabs);
+        self.set_indent(Some(!guessed.insert_spaces), Some(guessed.tab_size), cx);
+    }
+
+    fn enter_size_mode(
+        &mut self,
+        target: SizeTarget,
+        window: &mut Window,
+        cx: &mut Context<Picker<Self>>,
+    ) {
+        self.mode = Mode::TabSize(target);
+        self.query.clear();
+        let current = self.current_tab_size(cx) as usize;
+        self.selected_index = current.clamp(1, TAB_SIZES.len()) - 1;
+        self.refresh_matches();
+        cx.defer_in(window, |picker, window, cx| {
+            picker.set_query("", window, cx);
+            picker.refresh_placeholder(window, cx);
         });
+        cx.notify();
     }
 }
 
@@ -275,7 +279,7 @@ impl PickerDelegate for IndentSelectorDelegate {
     fn placeholder_text(&self, _window: &mut Window, _cx: &mut App) -> Arc<str> {
         match self.mode {
             Mode::Actions => t!("Select Action").as_ref().into(),
-            Mode::TabSize => t!("Select Tab Size for Current File").as_ref().into(),
+            Mode::TabSize(_) => t!("Select Tab Size for Current File").as_ref().into(),
         }
     }
 
@@ -297,48 +301,43 @@ impl PickerDelegate for IndentSelectorDelegate {
         };
         match choice {
             Choice::Size(size) => {
-                self.update_language_settings(cx, move |content| {
-                    content.tab_size = NonZeroU32::new(size);
-                });
-            }
-            Choice::Action(IndentAction::ChangeTabSize) => {
-                self.mode = Mode::TabSize;
-                self.query.clear();
-                let current = LanguageSettings::for_buffer(self.buffer.read(cx), cx)
-                    .tab_size
-                    .get() as usize;
-                self.selected_index = current.clamp(1, TAB_SIZES.len()) - 1;
-                self.refresh_matches();
-                cx.notify();
-                return;
+                let Mode::TabSize(target) = self.mode else {
+                    return;
+                };
+                match target {
+                    SizeTarget::Spaces => self.set_indent(Some(false), Some(size), cx),
+                    SizeTarget::Tabs => self.set_indent(Some(true), Some(size), cx),
+                    SizeTarget::DisplayOnly => self.set_indent(None, Some(size), cx),
+                }
             }
             Choice::Action(IndentAction::UseSpaces) => {
-                self.update_language_settings(cx, |content| content.hard_tabs = Some(false));
+                self.enter_size_mode(SizeTarget::Spaces, window, cx);
+                return;
             }
             Choice::Action(IndentAction::UseTabs) => {
-                self.update_language_settings(cx, |content| content.hard_tabs = Some(true));
+                self.enter_size_mode(SizeTarget::Tabs, window, cx);
+                return;
+            }
+            Choice::Action(IndentAction::ChangeTabSize) => {
+                self.enter_size_mode(SizeTarget::DisplayOnly, window, cx);
+                return;
             }
             Choice::Action(IndentAction::Detect) => self.detect_indentation(cx),
             Choice::Action(IndentAction::ConvertToSpaces) => {
-                self.editor
-                    .update(cx, |editor, cx| {
-                        editor.convert_indentation_to_spaces(
-                            &ConvertIndentationToSpaces,
-                            window,
-                            cx,
-                        )
-                    })
-                    .ok();
+                let tab_size = self.current_tab_size(cx);
+                let text = self.buffer.read(cx).text();
+                self.apply_edits(convert_to_spaces(&text, tab_size), cx);
+                self.set_indent(Some(false), None, cx);
             }
             Choice::Action(IndentAction::ConvertToTabs) => {
-                self.editor
-                    .update(cx, |editor, cx| {
-                        editor.convert_indentation_to_tabs(&ConvertIndentationToTabs, window, cx)
-                    })
-                    .ok();
+                let tab_size = self.current_tab_size(cx);
+                let text = self.buffer.read(cx).text();
+                self.apply_edits(convert_to_tabs(&text, tab_size), cx);
+                self.set_indent(Some(true), None, cx);
             }
             Choice::Action(IndentAction::TrimTrailingWhitespace) => {
-                self.trim_trailing_whitespace(cx);
+                let text = self.buffer.read(cx).text();
+                self.apply_edits(trim_trailing_whitespace(&text), cx);
             }
         }
         self.dismissed(window, cx);
@@ -381,14 +380,28 @@ impl PickerDelegate for IndentSelectorDelegate {
     ) -> Option<Self::ListItem> {
         let choice = *self.matches.get(ix)?;
         let label = Self::choice_label(choice);
+        let focus_color = Color::Custom(gpui::rgb(FOCUS_COLOR).into());
+        let (text_color, description_color) = if selected {
+            (focus_color, focus_color)
+        } else {
+            (Color::Default, Color::Muted)
+        };
         let hint = match choice {
             Choice::Action(action) if self.query.is_empty() => action.hint(),
             _ => None,
         };
-        let current_size = match choice {
+        let description = match choice {
             Choice::Size(size) => {
-                let settings = LanguageSettings::for_buffer(self.buffer.read(cx), cx);
-                (settings.tab_size.get() == size).then_some(())
+                let current = self.current_tab_size(cx);
+                if size == self.configured_tab_size && size == current {
+                    Some(t!("Configured Tab Size"))
+                } else if size == self.configured_tab_size {
+                    Some(t!("Default Tab Size"))
+                } else if size == current {
+                    Some(t!("Current Tab Size"))
+                } else {
+                    None
+                }
             }
             Choice::Action(_) => None,
         };
@@ -398,16 +411,20 @@ impl PickerDelegate for IndentSelectorDelegate {
                 .inset(true)
                 .spacing(ListItemSpacing::Sparse)
                 .toggle_state(selected)
-                .child(Label::new(label))
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(Label::new(label).color(text_color))
+                        .when_some(description, |this, description| {
+                            this.child(
+                                Label::new(description)
+                                    .size(LabelSize::Small)
+                                    .color(description_color),
+                            )
+                        }),
+                )
                 .when_some(hint, |item, hint| {
                     item.end_slot(Label::new(hint).size(LabelSize::Small).color(Color::Muted))
-                })
-                .when(current_size.is_some(), |item| {
-                    item.end_slot(
-                        Label::new(t!("Configured Tab Size"))
-                            .size(LabelSize::Small)
-                            .color(Color::Muted),
-                    )
                 }),
         )
     }

@@ -1,5 +1,6 @@
 mod application_menu;
 mod git_branch_status;
+mod layout_controls;
 mod onboarding_banner;
 mod title_bar_settings;
 mod update_version;
@@ -155,6 +156,7 @@ pub struct TitleBar {
     _subscriptions: Vec<Subscription>,
     banner: Option<Entity<OnboardingBanner>>,
     update_version: Entity<UpdateVersion>,
+    layout_menu_handle: ui::PopoverMenuHandle<ui::ContextMenu>,
 }
 
 impl Render for TitleBar {
@@ -377,6 +379,7 @@ impl Render for TitleBar {
                 .gap_1()
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .child(self.update_version.clone())
+                .child(self.render_layout_controls(window, cx))
                 .into_any_element(),
         );
 
@@ -499,6 +502,7 @@ impl TitleBar {
             _subscriptions: subscriptions,
             banner,
             update_version,
+            layout_menu_handle: Default::default(),
         };
         if let Some(multi_workspace) = multi_workspace {
             this.observe_multi_workspace(&multi_workspace, cx);
