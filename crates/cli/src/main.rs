@@ -1058,7 +1058,7 @@ mod flatpak {
         if let Some(flatpak_dir) = get_flatpak_dir() {
             let mut args = vec!["/usr/bin/flatpak-spawn".into(), "--host".into()];
             args.append(&mut get_xdg_env_args());
-            args.push("--env=ZED_UPDATE_EXPLANATION=Please use flatpak to update zed".into());
+            args.push("--env=CRAB_UPDATE_EXPLANATION=Please use flatpak to update crab".into());
             args.push(
                 format!(
                     "--env={EXTRA_LIB_ENV_NAME}={}",
@@ -1083,7 +1083,7 @@ mod flatpak {
             && args.zed.is_none()
         {
             args.zed = Some("/app/libexec/crab-editor".into());
-            unsafe { env::set_var("ZED_UPDATE_EXPLANATION", "Please use flatpak to update zed") };
+            unsafe { env::set_var("CRAB_UPDATE_EXPLANATION", "Please use flatpak to update crab") };
         }
         args
     }

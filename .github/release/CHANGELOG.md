@@ -4,6 +4,9 @@ All notable user-facing changes to Crab are listed here, newest first.
 
 ## Unreleased
 
+- "Check for Updates" is in the Help menu on Windows and Linux (the Crab menu on macOS) and works even when auto-update is off. It now reports when you are up to date.
+- The `ZED_UPDATE_EXPLANATION` environment variable is now `CRAB_UPDATE_EXPLANATION`.
+
 ## 1.0.1 - 2026-11-17
 
 - New app icon, and a README logo that stays visible on light backgrounds.

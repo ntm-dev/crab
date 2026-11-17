@@ -344,8 +344,8 @@ pub fn init(client: Arc<Client>, cx: &mut App) {
             .map(|channel| channel.poll_for_updates())
             .unwrap_or(false);
 
-        if option_env!("ZED_UPDATE_EXPLANATION").is_none()
-            && env::var("ZED_UPDATE_EXPLANATION").is_err()
+        if option_env!("CRAB_UPDATE_EXPLANATION").is_none()
+            && env::var("CRAB_UPDATE_EXPLANATION").is_err()
             && poll_for_updates
         {
             let mut update_subscription = AutoUpdateSetting::get_global(cx)
@@ -370,9 +370,9 @@ pub fn init(client: Arc<Client>, cx: &mut App) {
 }
 
 pub fn check(_: &Check, window: &mut Window, cx: &mut App) {
-    if let Some(message) = option_env!("ZED_UPDATE_EXPLANATION")
+    if let Some(message) = option_env!("CRAB_UPDATE_EXPLANATION")
         .map(ToOwned::to_owned)
-        .or_else(|| env::var("ZED_UPDATE_EXPLANATION").ok())
+        .or_else(|| env::var("CRAB_UPDATE_EXPLANATION").ok())
     {
         drop(window.prompt(
             gpui::PromptLevel::Info,
@@ -388,6 +388,13 @@ pub fn check(_: &Check, window: &mut Window, cx: &mut App) {
         .map(|channel| channel.poll_for_updates())
         .unwrap_or(false)
     {
+        drop(window.prompt(
+            gpui::PromptLevel::Info,
+            &t!("Could not check for updates"),
+            Some(&t!("Updates are not available in development builds.")),
+            &[PromptButton::ok(t!("OK"))],
+            cx,
+        ));
         return;
     }
 
@@ -612,6 +619,24 @@ impl AutoUpdater {
                     };
 
                     cx.notify();
+                } else if check_type.is_manual() && matches!(this.status, AutoUpdateStatus::Idle) {
+                    let version = this.current_version.clone();
+                    if let Some(window) = cx.active_window() {
+                        window
+                            .update(cx, |_, window, cx| {
+                                drop(window.prompt(
+                                    gpui::PromptLevel::Info,
+                                    &t!("There are currently no updates available."),
+                                    Some(&t!(
+                                        "Crab {version} is the latest version.",
+                                        version = version
+                                    )),
+                                    &[PromptButton::ok(t!("OK"))],
+                                    cx,
+                                ));
+                            })
+                            .ok();
+                    }
                 }
             })
             .ok()

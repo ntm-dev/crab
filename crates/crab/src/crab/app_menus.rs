@@ -353,7 +353,19 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
                         url: "https://github.com/ntm-dev/crab".into(),
                     },
                 ),
-            ],
+            ]
+            .into_iter()
+            .chain(
+                (!cfg!(target_os = "macos")).then(|| {
+                    [
+                        MenuItem::separator(),
+                        MenuItem::action(t!("Check for Updates"), auto_update::Check),
+                    ]
+                })
+                .into_iter()
+                .flatten(),
+            )
+            .collect(),
         },
     ]
 }
