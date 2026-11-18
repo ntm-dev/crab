@@ -1564,9 +1564,17 @@ impl Item for TerminalView {
                         this.child(
                             div()
                                 .absolute()
-                                .top_0()
-                                .left_0()
-                                .size_full()
+                                .top(px(-2.))
+                                .bottom(px(-2.))
+                                .left(px(-4.))
+                                .right(px(-4.))
+                                .px_1()
+                                .flex()
+                                .items_center()
+                                .bg(cx.theme().colors().editor_background)
+                                .border_1()
+                                .border_color(cx.theme().colors().border_focused)
+                                .rounded_sm()
                                 .child(editor)
                                 .on_action(move |_: &menu::Confirm, window, cx| {
                                     self_handle

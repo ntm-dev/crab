@@ -41,7 +41,7 @@ impl Render for ActiveFileName {
         div()
             .child(
                 Button::new("active-file-name-button", project_path)
-                    .label_size(LabelSize::Small)
+                    .label_size(LabelSize::Default)
                     .tooltip(Tooltip::text(tooltip_text)),
             )
             .into_any_element()

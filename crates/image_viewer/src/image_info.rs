@@ -78,7 +78,7 @@ impl Render for ImageInfo {
             _ => t!("Unknown").to_string(),
         });
 
-        div().child(Label::new(components.join(" • ")).size(LabelSize::Small))
+        div().child(Label::new(components.join(" • ")).size(LabelSize::Default))
     }
 }
 

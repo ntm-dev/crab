@@ -76,12 +76,29 @@ pub(crate) fn inject_zsh<S: std::hash::BuildHasher>(
         return false;
     }
 
+    let is_injected = |path: &str| {
+        std::path::Path::new(path)
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with("crab-shell-integration-"))
+    };
     let user_zdotdir = env
         .get("ZDOTDIR")
         .cloned()
-        .or_else(|| std::env::var("ZDOTDIR").ok());
-    if let Some(user_zdotdir) = user_zdotdir {
-        env.insert("CRAB_USER_ZDOTDIR".to_string(), user_zdotdir);
+        .or_else(|| std::env::var("ZDOTDIR").ok())
+        .filter(|path| !is_injected(path))
+        .or_else(|| {
+            env.get("CRAB_USER_ZDOTDIR")
+                .cloned()
+                .or_else(|| std::env::var("CRAB_USER_ZDOTDIR").ok())
+                .filter(|path| !is_injected(path))
+        });
+    match user_zdotdir {
+        Some(user_zdotdir) => {
+            env.insert("CRAB_USER_ZDOTDIR".to_string(), user_zdotdir);
+        }
+        None => {
+            env.insert("CRAB_USER_ZDOTDIR".to_string(), String::new());
+        }
     }
     env.insert(
         "ZDOTDIR".to_string(),

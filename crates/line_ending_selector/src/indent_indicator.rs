@@ -66,7 +66,7 @@ impl Render for IndentIndicator {
         div().when_some(self.label.clone(), |el, label| {
             el.child(
                 Button::new("indent-indicator", label)
-                    .label_size(LabelSize::Small)
+                    .label_size(LabelSize::Default)
                     .tab_index(0isize)
                     .on_click(cx.listener(|this, _, window, cx| {
                         if let Some(editor) = this.active_editor.as_ref() {

@@ -1365,18 +1365,17 @@ impl Render for Dock {
         if let Some(entry) = self.visible_entry() {
             let position = self.position;
             let grip_color = cx.theme().colors().text_disabled;
+            let sash_color = cx.theme().colors().border_focused;
+            let dragging = cx
+                .active_drag_value::<DraggedDock>()
+                .is_some_and(|dragged| dragged.0 == position);
             let create_resize_handle = || {
                 let dot = move || div().size(px(2.)).rounded_full().bg(grip_color);
                 let grip = match position {
                     DockPosition::Left | DockPosition::Right => {
-                        let offset = if position == DockPosition::Left {
-                            RESIZE_HANDLE_SIZE / 2. + px(2.)
-                        } else {
-                            RESIZE_HANDLE_SIZE / 2. - px(3.)
-                        };
                         v_flex()
                             .absolute()
-                            .left(offset)
+                            .left(px(3.))
                             .top_0()
                             .bottom_0()
                             .justify_center()
@@ -1387,7 +1386,7 @@ impl Render for Dock {
                     }
                     DockPosition::Bottom => h_flex()
                         .absolute()
-                        .top(RESIZE_HANDLE_SIZE / 2. - px(4.))
+                        .top(px(3.))
                         .left_0()
                         .right_0()
                         .justify_center()
@@ -1397,9 +1396,28 @@ impl Render for Dock {
                         .child(dot()),
                 }
                 .group_hover("dock-resize-handle", |style| style.opacity(0.));
+                let sash = match position {
+                    DockPosition::Left | DockPosition::Right => div()
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .left(px(2.))
+                        .w(px(4.)),
+                    DockPosition::Bottom => div()
+                        .absolute()
+                        .left_0()
+                        .right_0()
+                        .top(px(2.))
+                        .h(px(4.)),
+                }
+                .rounded(px(2.))
+                .id("dock-resize-sash")
+                .group_hover("dock-resize-handle", move |style| style.bg(sash_color))
+                .when(dragging, move |style| style.bg(sash_color));
                 let handle = div()
                     .id("resize-handle")
                     .group("dock-resize-handle")
+                    .child(sash)
                     .child(grip)
                     .on_drag(DraggedDock(position), |dock, _, _, cx| {
                         cx.stop_propagation();
@@ -1411,9 +1429,14 @@ impl Render for Dock {
                             cx.stop_propagation();
                         }),
                     )
+                    .on_mouse_up_out(
+                        MouseButton::Left,
+                        cx.listener(|_, _: &MouseUpEvent, _, cx| cx.notify()),
+                    )
                     .on_mouse_up(
                         MouseButton::Left,
                         cx.listener(|dock, e: &MouseUpEvent, window, cx| {
+                            cx.notify();
                             if e.click_count == 2 {
                                 dock.reset_panel_sizes(window, cx);
                                 dock.workspace
@@ -1430,28 +1453,28 @@ impl Render for Dock {
                     DockPosition::Left => deferred(
                         handle
                             .absolute()
-                            .right(-RESIZE_HANDLE_SIZE / 2.)
+                            .right(px(-7.))
                             .top(px(0.))
                             .h_full()
-                            .w(RESIZE_HANDLE_SIZE)
+                            .w(px(8.))
                             .cursor_col_resize(),
                     ),
                     DockPosition::Bottom => deferred(
                         handle
                             .absolute()
-                            .top(-RESIZE_HANDLE_SIZE / 2.)
+                            .top(px(-7.))
                             .left(px(0.))
                             .w_full()
-                            .h(RESIZE_HANDLE_SIZE)
+                            .h(px(8.))
                             .cursor_row_resize(),
                     ),
                     DockPosition::Right => deferred(
                         handle
                             .absolute()
                             .top(px(0.))
-                            .left(-RESIZE_HANDLE_SIZE / 2.)
+                            .left(px(-7.))
                             .h_full()
-                            .w(RESIZE_HANDLE_SIZE)
+                            .w(px(8.))
                             .cursor_col_resize(),
                     ),
                 }
@@ -1470,7 +1493,6 @@ impl Render for Dock {
                     }
                 })
                 .border_color(cx.theme().colors().border)
-                .overflow_hidden()
                 .map(|this| match self.position().axis() {
                     // Width and height are always set on the workspace wrapper in
                     // render_dock, so fill whatever space the wrapper provides.
@@ -1490,6 +1512,8 @@ impl Render for Dock {
                 })
                 .child(
                     div()
+                        .overflow_hidden()
+                        .rounded(px(7.))
                         .map(|this| match self.position().axis() {
                             Axis::Horizontal => this.w_full().h_full(),
                             Axis::Vertical => this.h_full().w_full(),

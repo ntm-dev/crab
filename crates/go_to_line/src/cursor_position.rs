@@ -231,7 +231,7 @@ impl Render for CursorPosition {
 
             el.child(
                 Button::new("go-to-line-column", text)
-                    .label_size(LabelSize::Small)
+                    .label_size(LabelSize::Default)
                     .tab_index(0isize)
                     .aria_label(t!(
                         "Line {line}, column {column}",

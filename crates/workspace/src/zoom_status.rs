@@ -45,8 +45,8 @@ impl Render for ZoomStatus {
             PopoverMenu::new("zoom-status-menu")
                 .anchor(Anchor::BottomRight)
                 .trigger_with_tooltip(
-                    Button::new("zoom-status", "")
-                        .start_icon(Icon::new(icon).size(IconSize::Small))
+                    IconButton::new("zoom-status", icon)
+                        .icon_size(IconSize::Medium)
                         .style(ButtonStyle::Tinted(ui::TintColor::Accent)),
                     Tooltip::text(tooltip_text),
                 )
@@ -96,7 +96,7 @@ impl Render for ZoomStatus {
                                 .child(Divider::vertical())
                                 .child(
                                     Button::new("zoom-reset", t!("Reset"))
-                                        .label_size(LabelSize::Small)
+                                        .label_size(LabelSize::Default)
                                         .on_click(|_, window, cx| {
                                             dispatch_zoom_action(
                                                 "crab::ResetBufferFontSize",

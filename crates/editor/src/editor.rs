@@ -2835,6 +2835,14 @@ impl Editor {
         );
     }
 
+    fn next_untitled_index(workspace: &Workspace, cx: &App) -> usize {
+        workspace
+            .items_of_type::<Editor>(cx)
+            .filter_map(|editor| editor.read(cx).buffer.read(cx).untitled_index())
+            .max()
+            .map_or(1, |max| max + 1)
+    }
+
     pub fn new_in_workspace(
         workspace: &mut Workspace,
         window: &mut Window,
@@ -2849,8 +2857,14 @@ impl Editor {
                 buffer.set_content_language_detection_enabled(true);
             });
             workspace.update_in(cx, |workspace, window, cx| {
+                let index = Self::next_untitled_index(workspace, cx);
                 let editor =
                     cx.new(|cx| Editor::for_buffer(buffer, Some(project.clone()), window, cx));
+                editor.update(cx, |editor, cx| {
+                    editor
+                        .buffer
+                        .update(cx, |buffer, cx| buffer.set_untitled_index(index, cx));
+                });
                 workspace.add_item_to_active_pane(Box::new(editor.clone()), None, true, window, cx);
                 editor
             })
@@ -2899,14 +2913,15 @@ impl Editor {
                 buffer.set_content_language_detection_enabled(true);
             });
             workspace.update_in(cx, move |workspace, window, cx| {
-                workspace.split_item(
-                    direction,
-                    Box::new(
-                        cx.new(|cx| Editor::for_buffer(buffer, Some(project.clone()), window, cx)),
-                    ),
-                    window,
-                    cx,
-                )
+                let index = Self::next_untitled_index(workspace, cx);
+                let editor =
+                    cx.new(|cx| Editor::for_buffer(buffer, Some(project.clone()), window, cx));
+                editor.update(cx, |editor, cx| {
+                    editor
+                        .buffer
+                        .update(cx, |buffer, cx| buffer.set_untitled_index(index, cx));
+                });
+                workspace.split_item(direction, Box::new(editor), window, cx)
             })?;
             anyhow::Ok(())
         })
@@ -11065,7 +11080,7 @@ impl Editor {
                 font_family: settings.ui_font.family.clone(),
                 font_features: settings.ui_font.features.clone(),
                 font_fallbacks: settings.ui_font.fallbacks.clone(),
-                font_size: rems(0.875).into(),
+                font_size: rems(1.).into(),
                 font_weight: settings.ui_font.weight,
                 line_height: relative(settings.buffer_line_height.value()),
                 ..Default::default()
@@ -12115,7 +12130,7 @@ impl ui_input::ErasedEditor for ErasedEditorImpl {
         let text_style = TextStyle {
             font_family: settings.ui_font.family.clone(),
             font_features: settings.ui_font.features.clone(),
-            font_size: rems(0.875).into(),
+            font_size: rems(1.).into(),
             font_weight: settings.ui_font.weight,
             font_style: FontStyle::Normal,
             line_height: relative(1.2),

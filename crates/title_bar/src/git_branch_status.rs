@@ -86,7 +86,7 @@ impl Render for GitBranchStatus {
             .trigger_with_tooltip(
                 Button::new("status-bar-branch-trigger", display_label)
                     .selected_style(ButtonStyle::Tinted(TintColor::Accent))
-                    .label_size(LabelSize::Small)
+                    .label_size(LabelSize::Default)
                     .color(Color::Default)
                     .start_icon(
                         Icon::new(IconName::GitBranch)

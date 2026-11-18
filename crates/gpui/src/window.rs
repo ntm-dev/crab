@@ -3418,7 +3418,26 @@ impl Window {
                 size: self.viewport_size(),
             };
 
-            if tooltip_bounds.right() > window_bounds.right() {
+            let mut placed_beside_anchor = false;
+            if let Some(anchor) = tooltip_request.tooltip.anchor_left_of {
+                let left_x = anchor.left() - tooltip_size.width;
+                let right_x = anchor.right();
+                if left_x >= Pixels::ZERO {
+                    tooltip_bounds.origin.x = left_x;
+                    placed_beside_anchor = true;
+                } else if right_x + tooltip_size.width <= window_bounds.right() {
+                    tooltip_bounds.origin.x = right_x;
+                    placed_beside_anchor = true;
+                }
+                if placed_beside_anchor {
+                    tooltip_bounds.origin.y = anchor.center().y - tooltip_size.height / 2.;
+                    let max_y = window_bounds.bottom() - tooltip_size.height;
+                    tooltip_bounds.origin.y =
+                        tooltip_bounds.origin.y.min(max_y).max(Pixels::ZERO);
+                }
+            }
+
+            if !placed_beside_anchor && tooltip_bounds.right() > window_bounds.right() {
                 let new_x = mouse_position.x - tooltip_bounds.size.width - px(1.);
                 if new_x >= Pixels::ZERO {
                     tooltip_bounds.origin.x = new_x;
@@ -3430,7 +3449,7 @@ impl Window {
                 }
             }
 
-            if tooltip_bounds.bottom() > window_bounds.bottom() {
+            if !placed_beside_anchor && tooltip_bounds.bottom() > window_bounds.bottom() {
                 let new_y = mouse_position.y - tooltip_bounds.size.height - px(1.);
                 if new_y >= Pixels::ZERO {
                     tooltip_bounds.origin.y = new_y;

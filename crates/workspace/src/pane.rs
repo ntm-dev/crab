@@ -2958,6 +2958,7 @@ impl Pane {
         let close_side = &settings.close_position;
         let show_close_button = &settings.show_close_button;
         let indicator = render_item_indicator(item.boxed_clone(), cx);
+        let overlay_indicator = render_item_indicator(item.boxed_clone(), cx);
         let tab_tooltip_content = item.tab_tooltip_content(cx);
         let item_id = item.item_id();
         let is_pinned = self.is_tab_pinned(ix);
@@ -3077,7 +3078,9 @@ impl Pane {
                 this.drag_split_direction = None;
                 this.handle_external_paths_drop(paths, window, cx)
             }))
-            .start_slot::<Indicator>(indicator)
+            .start_slot::<Indicator>(
+                indicator.filter(|_| matches!(show_close_button, ShowCloseButton::Hidden)),
+            )
             .map(|this| {
                 let end_slot_action: &'static dyn Action;
                 let end_slot_tooltip_text: SharedString;
@@ -3103,7 +3106,9 @@ impl Pane {
                         ShowCloseButton::Always => IconButton::new("close tab", IconName::Close)
                             .when(has_indicator, |button| button.visible_on_hover("")),
                         ShowCloseButton::Hover => IconButton::new("close tab", IconName::Close)
-                            .when(!is_active, |button| button.visible_on_hover("")),
+                            .when(!is_active || has_indicator, |button| {
+                                button.visible_on_hover("")
+                            }),
                         ShowCloseButton::Hidden => return this,
                     }
                     .shape(IconButtonShape::Square)
@@ -3130,6 +3135,23 @@ impl Pane {
                         this.tooltip(Tooltip::text(end_slot_tooltip_text))
                     }
                 });
+                let end_slot = match overlay_indicator {
+                    Some(indicator) => div()
+                        .relative()
+                        .child(
+                            div()
+                                .absolute()
+                                .inset_0()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .group_hover("", |style| style.invisible())
+                                .child(indicator),
+                        )
+                        .child(end_slot)
+                        .into_any_element(),
+                    None => end_slot.into_any_element(),
+                };
                 this.end_slot(end_slot)
             })
             .child(
@@ -5185,11 +5207,11 @@ pub fn render_item_indicator(item: Box<dyn ItemHandle>, cx: &App) -> Option<Indi
     maybe!({
         let indicator_color = match (item.has_conflict(cx), item.is_dirty(cx)) {
             (true, _) => Color::Warning,
-            (_, true) => Color::Accent,
+            (_, true) => Color::Default,
             (false, false) => return None,
         };
 
-        Some(Indicator::dot().color(indicator_color))
+        Some(Indicator::large_dot().color(indicator_color))
     })
 }
 

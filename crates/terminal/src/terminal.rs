@@ -1066,6 +1066,10 @@ impl TerminalBuilder {
             cwd_history: Vec::new(),
             pending_cwd_boundary: None,
             command_marks: Vec::new(),
+            shell_integration_injected: false,
+            shell_command_line: None,
+            env_contributions: Vec::new(),
+            seen_sequences: Vec::new(),
             last_history_size: 0,
             scrollback_capacity: scrolling_history,
             #[cfg(any(test, feature = "test-support"))]
@@ -1138,6 +1142,17 @@ impl TerminalBuilder {
 
             insert_zed_terminal_env(&mut env, &version);
 
+            let shell_command_line = match &shell {
+                Shell::System => env
+                    .get("SHELL")
+                    .cloned()
+                    .or_else(|| std::env::var("SHELL").ok()),
+                Shell::Program(program) => Some(program.clone()),
+                Shell::WithArguments { program, args, .. } => {
+                    Some(std::iter::once(program.clone()).chain(args.iter().cloned()).collect::<Vec<_>>().join(" "))
+                }
+            };
+            let mut shell_integration_injected = false;
             if !cfg!(windows) && !is_remote_terminal && !no_pty && task.is_none() {
                 let shell_program = match &shell {
                     Shell::System => env
@@ -1151,9 +1166,21 @@ impl TerminalBuilder {
                     .as_deref()
                     .is_some_and(shell_integration::is_zsh)
                 {
-                    shell_integration::inject_zsh(&mut env, &version.to_string());
+                    shell_integration_injected =
+                        shell_integration::inject_zsh(&mut env, &version.to_string());
                 }
             }
+            let env_contributions: Vec<(String, String)> = if shell_integration_injected {
+                ["ZDOTDIR", "CRAB_USER_ZDOTDIR"]
+                    .iter()
+                    .filter_map(|name| {
+                        env.get(*name)
+                            .map(|value| (name.to_string(), value.clone()))
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
 
             #[derive(Default)]
             struct ShellParams {
@@ -1385,6 +1412,10 @@ impl TerminalBuilder {
                 },
                 pending_cwd_boundary: None,
                 command_marks: Vec::new(),
+                shell_integration_injected,
+                shell_command_line,
+                env_contributions,
+                seen_sequences: Vec::new(),
                 last_history_size: 0,
                 scrollback_capacity: scrolling_history,
                 #[cfg(any(test, feature = "test-support"))]
@@ -1568,6 +1599,10 @@ pub struct Terminal {
     cwd_history: Vec<CwdHistoryEntry>,
     pending_cwd_boundary: Option<i32>,
     command_marks: Vec<CommandMark>,
+    shell_integration_injected: bool,
+    shell_command_line: Option<String>,
+    env_contributions: Vec<(String, String)>,
+    seen_sequences: Vec<&'static str>,
     last_history_size: usize,
     scrollback_capacity: usize,
     #[cfg(any(test, feature = "test-support"))]
@@ -2971,6 +3006,7 @@ impl Terminal {
             return;
         }
 
+        self.record_sequence("cwd");
         let scrollback_position = self.pending_cwd_boundary.take().unwrap_or_else(|| {
             let term = self.term.lock_unfair();
             Self::scrollback_position(term.grid().cursor.point.line.0, term.history_size())
@@ -3004,11 +3040,13 @@ impl Terminal {
     fn handle_shell_marker(&mut self, marker: shell_integration::ShellMarker, cx: &mut Context<Self>) {
         match marker {
             shell_integration::ShellMarker::CommandStarted => {
+                self.record_sequence("run");
                 if let Some(mark) = self.command_marks.last_mut() {
                     mark.status = CommandStatus::Running;
                 }
             }
             shell_integration::ShellMarker::CommandFinished(code) => {
+                self.record_sequence("done");
                 let position = {
                     let term = self.term.lock_unfair();
                     Self::scrollback_position(term.grid().cursor.point.line.0, term.history_size())
@@ -3224,6 +3262,46 @@ impl Terminal {
     pub fn pid(&self) -> Option<sysinfo::Pid> {
         match &self.terminal_type {
             TerminalType::Pty { info, .. } => info.pid(),
+            TerminalType::DisplayOnly => None,
+        }
+    }
+
+    pub fn shell_integration_injected(&self) -> bool {
+        self.shell_integration_injected
+    }
+
+    pub fn env_contributions(&self) -> &[(String, String)] {
+        &self.env_contributions
+    }
+
+    pub fn seen_sequences(&self) -> &[&'static str] {
+        &self.seen_sequences
+    }
+
+    fn record_sequence(&mut self, name: &'static str) {
+        if !self.seen_sequences.contains(&name) {
+            self.seen_sequences.push(name);
+        }
+    }
+
+    pub fn shell_type(&self) -> Option<String> {
+        let program = self.shell_command_line.as_deref()?.split_whitespace().next()?;
+        let name = std::path::Path::new(program).file_name()?.to_str()?;
+        Some(name.trim_start_matches('-').to_string())
+    }
+
+    pub fn shell_command_line(&self) -> Option<String> {
+        self.shell_command_line.clone()
+    }
+
+    pub fn foreground_command_line(&self) -> Option<String> {
+        match &self.terminal_type {
+            TerminalType::Pty { info, .. } => info
+                .current
+                .read()
+                .as_ref()
+                .map(|process| process.argv.join(" "))
+                .filter(|line| !line.is_empty()),
             TerminalType::DisplayOnly => None,
         }
     }

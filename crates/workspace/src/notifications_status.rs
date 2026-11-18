@@ -180,7 +180,7 @@ impl Render for NotificationsCenter {
                     .bg(header_background)
                     .child(
                         Label::new(title)
-                            .size(LabelSize::Small)
+                            .size(LabelSize::Default)
                             .weight(gpui::FontWeight::SEMIBOLD),
                     )
                     .child(

@@ -253,6 +253,10 @@ impl Render for TitleBar {
                 .flex_1()
                 .min_w_0()
                 .overflow_hidden()
+                .child(h_flex()
+                .h_full()
+                .min_w_0()
+                .overflow_hidden()
                 .gap_0p5()
                 .map(|title_bar| {
                     let mut render_project_items = title_bar_settings.show_branch_name
@@ -291,7 +295,7 @@ impl Render for TitleBar {
                                 )
                         })
                 })
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()))
                 .into_any_element(),
         );
 
@@ -363,7 +367,7 @@ impl Render for TitleBar {
                         )
                         .child(
                             Label::new(command_center_label)
-                                .size(LabelSize::Small)
+                                .size(LabelSize::Default)
                                 .color(Color::Muted)
                                 .truncate(),
                         ),
@@ -376,10 +380,13 @@ impl Render for TitleBar {
                 .flex_1()
                 .justify_end()
                 .pr_1()
-                .gap_1()
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .child(self.update_version.clone())
-                .child(self.render_layout_controls(window, cx))
+                .child(
+                    h_flex()
+                        .gap_1()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .child(self.update_version.clone())
+                        .child(self.render_layout_controls(window, cx)),
+                )
                 .into_any_element(),
         );
 
@@ -672,7 +679,7 @@ impl TitleBar {
                                     ))
                                     .into_any_element(),
                                 )
-                                .child(Label::new(nickname).size(LabelSize::Small).truncate()),
+                                .child(Label::new(nickname).size(LabelSize::Default).truncate()),
                         ),
                     move |_window, cx| {
                         Tooltip::with_meta(
@@ -697,7 +704,7 @@ impl TitleBar {
 
         let button = Button::new("restricted_mode_trigger", t!("Restricted Mode"))
             .style(ButtonStyle::Tinted(TintColor::Warning))
-            .label_size(LabelSize::Small)
+            .label_size(LabelSize::Default)
             .color(Color::Warning)
             .start_icon(
                 Icon::new(IconName::Warning)
@@ -789,15 +796,13 @@ impl TitleBar {
             })
             .trigger_with_tooltip(
                 Button::new("project_name_trigger", display_name)
-                    .label_size(LabelSize::Small)
+                    .label_size(LabelSize::Default)
                     .tab_index(0isize)
-                    .when(self.worktree_count(cx) > 1, |this| {
-                        this.end_icon(
-                            Icon::new(IconName::ChevronDown)
-                                .size(IconSize::XSmall)
-                                .color(Color::Muted),
-                        )
-                    })
+                    .end_icon(
+                        Icon::new(IconName::ChevronDown)
+                            .size(IconSize::XSmall)
+                            .color(Color::Muted),
+                    )
                     .selected_style(ButtonStyle::Tinted(TintColor::Accent))
                     .when(!is_project_selected, |s| s.color(Color::Muted)),
                 move |_window, cx| {
@@ -897,7 +902,7 @@ impl TitleBar {
                 .trigger_with_tooltip(
                     Button::new("worktree_picker_trigger", display_label)
                         .selected_style(ButtonStyle::Tinted(TintColor::Accent))
-                        .label_size(LabelSize::Small)
+                        .label_size(LabelSize::Default)
                         .color(Color::Muted)
                         .tab_index(0isize)
                         .loading(is_creating)
@@ -930,7 +935,7 @@ impl TitleBar {
                 let trigger = if is_detached_head {
                     Button::new("project_branch_trigger", t!("Create Branch"))
                         .selected_style(ButtonStyle::Tinted(TintColor::Accent))
-                        .label_size(LabelSize::Small)
+                        .label_size(LabelSize::Default)
                         .tab_index(0isize)
                         .start_icon(
                             Icon::new(IconName::GitBranchPlus)
@@ -940,7 +945,7 @@ impl TitleBar {
                 } else {
                     Button::new("project_branch_trigger", branch_name)
                         .selected_style(ButtonStyle::Tinted(TintColor::Accent))
-                        .label_size(LabelSize::Small)
+                        .label_size(LabelSize::Default)
                         .color(Color::Muted)
                         .tab_index(0isize)
                         .start_icon(
@@ -992,7 +997,7 @@ impl TitleBar {
                 .when(show_separator, |this| {
                     this.child(
                         Label::new("/")
-                            .size(LabelSize::Small)
+                            .size(LabelSize::Default)
                             .color(Color::Muted)
                             .alpha(0.25),
                     )

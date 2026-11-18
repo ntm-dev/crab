@@ -117,7 +117,7 @@ pub(crate) fn render_text_input(
         font_family: settings.buffer_font.family.clone(),
         font_features: settings.buffer_font.features.clone(),
         font_fallbacks: settings.buffer_font.fallbacks.clone(),
-        font_size: rems(0.875).into(),
+        font_size: rems(1.).into(),
         font_weight: settings.buffer_font.weight,
         line_height: relative(1.3),
         ..TextStyle::default()

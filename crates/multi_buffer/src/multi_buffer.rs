@@ -87,6 +87,7 @@ pub struct MultiBuffer {
     /// The explicit title of the multi-buffer.
     /// If `None`, it will be derived from the underlying path or content.
     title: Option<String>,
+    untitled_index: Option<usize>,
     /// The writing capability of the multi-buffer.
     capability: Capability,
     buffer_changed_since_sync: Rc<Cell<bool>>,
@@ -1286,6 +1287,7 @@ impl MultiBuffer {
             singleton: false,
             capability,
             title: None,
+            untitled_index: None,
             buffer_changed_since_sync: Default::default(),
             history: History::default(),
         }
@@ -1322,6 +1324,7 @@ impl MultiBuffer {
             capability: self.capability,
             history: self.history.clone(),
             title: self.title.clone(),
+            untitled_index: self.untitled_index,
             buffer_changed_since_sync,
         }
     }
@@ -2207,12 +2210,26 @@ impl MultiBuffer {
                 return file.file_name(cx).into();
             }
 
-            if let Some(title) = self.buffer_content_title(buffer) {
+            if self.untitled_index.is_none()
+                && let Some(title) = self.buffer_content_title(buffer)
+            {
                 return title;
             }
         };
 
-        Self::DEFAULT_TITLE.into()
+        match self.untitled_index {
+            Some(index) => format!("Untitled-{index}").into(),
+            None => Self::DEFAULT_TITLE.into(),
+        }
+    }
+
+    pub fn untitled_index(&self) -> Option<usize> {
+        self.untitled_index
+    }
+
+    pub fn set_untitled_index(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.untitled_index = Some(index);
+        cx.notify();
     }
 
     fn buffer_content_title(&self, buffer: &Buffer) -> Option<Cow<'_, str>> {

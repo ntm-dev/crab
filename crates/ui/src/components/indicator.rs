@@ -5,6 +5,7 @@ use crate::prelude::*;
 enum IndicatorKind {
     #[default]
     Dot,
+    LargeDot,
     Bar,
     Icon(AnyIcon),
 }
@@ -20,6 +21,14 @@ impl Indicator {
     pub fn dot() -> Self {
         Self {
             kind: IndicatorKind::Dot,
+            border_color: None,
+            color: Color::Default,
+        }
+    }
+
+    pub fn large_dot() -> Self {
+        Self {
+            kind: IndicatorKind::LargeDot,
             border_color: None,
             color: Color::Default,
         }
@@ -58,7 +67,10 @@ impl RenderOnce for Indicator {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let container = div().flex_none();
         let container = if let Some(border_color) = self.border_color {
-            if matches!(self.kind, IndicatorKind::Dot | IndicatorKind::Bar) {
+            if matches!(
+                self.kind,
+                IndicatorKind::Dot | IndicatorKind::LargeDot | IndicatorKind::Bar
+            ) {
                 container.border_1().border_color(border_color.color(cx))
             } else {
                 container
@@ -73,6 +85,11 @@ impl RenderOnce for Indicator {
             IndicatorKind::Dot => container
                 .w_1p5()
                 .h_1p5()
+                .rounded_full()
+                .bg(self.color.color(cx)),
+            IndicatorKind::LargeDot => container
+                .w(px(8.))
+                .h(px(8.))
                 .rounded_full()
                 .bg(self.color.color(cx)),
             IndicatorKind::Bar => container

@@ -7409,7 +7409,6 @@ impl Workspace {
                     })
             })
             .flex()
-            .overflow_hidden()
             .flex_none()
             .child(dock.clone());
 
@@ -7643,7 +7642,59 @@ impl Workspace {
                         render_cx,
                         window,
                         cx,
-                    )),
+                    ))
+                    .child({
+                        let mask_color = cx.theme().colors().background;
+                        let border_color = cx.theme().colors().border;
+                        canvas(
+                            |_, _, _| {},
+                            move |bounds, _, window, _| {
+                                let r = px(7.);
+                                let half = px(0.5);
+                                let corners = [
+                                    (bounds.origin, 1.0_f32, 1.0_f32),
+                                    (bounds.top_right(), -1.0, 1.0),
+                                    (bounds.bottom_left(), 1.0, -1.0),
+                                    (bounds.bottom_right(), -1.0, -1.0),
+                                ];
+                                for (c, sx, sy) in corners {
+                                    let sweep = sx * sy < 0.;
+                                    let radii = point(r, r);
+
+                                    let mut fill = gpui::PathBuilder::fill();
+                                    fill.move_to(c);
+                                    fill.line_to(point(c.x + r * sx, c.y));
+                                    fill.arc_to(
+                                        radii,
+                                        px(0.),
+                                        false,
+                                        sweep,
+                                        point(c.x, c.y + r * sy),
+                                    );
+                                    fill.close();
+                                    if let Ok(path) = fill.build() {
+                                        window.paint_path(path, mask_color);
+                                    }
+
+                                    let outer = point(r + half, r + half);
+                                    let mut stroke = gpui::PathBuilder::stroke(px(1.));
+                                    stroke.move_to(point(c.x + r * sx, c.y - half * sy));
+                                    stroke.arc_to(
+                                        outer,
+                                        px(0.),
+                                        false,
+                                        sweep,
+                                        point(c.x - half * sx, c.y + r * sy),
+                                    );
+                                    if let Ok(path) = stroke.build() {
+                                        window.paint_path(path, border_color);
+                                    }
+                                }
+                            },
+                        )
+                        .absolute()
+                        .inset_0()
+                    }),
             )
     }
 

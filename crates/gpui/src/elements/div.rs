@@ -730,6 +730,12 @@ impl Interactivity {
         self.tooltip_show_delay = Some(delay);
     }
 
+    /// Place this element's tooltip to the left of the element instead of next to the mouse.
+    /// The imperative API equivalent to [`StatefulInteractiveElement::tooltip_left_of_element`].
+    pub fn tooltip_left_of_element(&mut self) {
+        self.tooltip_left_of_element = true;
+    }
+
     /// Block the mouse from all interactions with elements behind this element's hitbox. Typically
     /// `block_mouse_except_scroll` should be preferred.
     ///
@@ -1669,6 +1675,16 @@ pub trait StatefulInteractiveElement: InteractiveElement {
         self
     }
 
+    /// Place this element's tooltip to the left of the element instead of next to the mouse.
+    /// The fluent API equivalent to [`Interactivity::tooltip_left_of_element`].
+    fn tooltip_left_of_element(mut self) -> Self
+    where
+        Self: Sized,
+    {
+        self.interactivity().tooltip_left_of_element();
+        self
+    }
+
     /// Set the delay before this element's tooltip is shown.
     /// The fluent API equivalent to [`Interactivity::tooltip_show_delay`].
     fn tooltip_show_delay(mut self, delay: Duration) -> Self
@@ -2126,6 +2142,7 @@ pub struct Interactivity {
     pub(crate) hover_listener: Option<Box<dyn Fn(&bool, &mut Window, &mut App)>>,
     pub(crate) tooltip_builder: Option<TooltipBuilder>,
     pub(crate) tooltip_show_delay: Option<Duration>,
+    pub(crate) tooltip_left_of_element: bool,
     pub(crate) window_control: Option<WindowControlArea>,
     pub(crate) hitbox_behavior: HitboxBehavior,
     pub(crate) tab_index: Option<isize>,
@@ -3130,8 +3147,13 @@ impl Interactivity {
                     .clone();
 
                 let tooltip_is_hoverable = tooltip_builder.hoverable;
+                let anchor_left_of = self.tooltip_left_of_element.then_some(hitbox.bounds);
                 let build_tooltip = Rc::new(move |window: &mut Window, cx: &mut App| {
-                    Some(((tooltip_builder.build)(window, cx), tooltip_is_hoverable))
+                    Some((
+                        (tooltip_builder.build)(window, cx),
+                        tooltip_is_hoverable,
+                        anchor_left_of,
+                    ))
                 });
                 // Use bounds instead of testing hitbox since this is called during prepaint.
                 let check_is_hovered_during_prepaint = Rc::new({
@@ -3638,10 +3660,12 @@ pub(crate) fn set_tooltip_on_window(
     Some(window.set_tooltip(tooltip))
 }
 
+pub(crate) type TooltipBuild = (AnyView, bool, Option<Bounds<Pixels>>);
+
 pub(crate) fn register_tooltip_mouse_handlers(
     active_tooltip: &Rc<RefCell<Option<ActiveTooltip>>>,
     tooltip_id: Option<TooltipId>,
-    build_tooltip: Rc<dyn Fn(&mut Window, &mut App) -> Option<(AnyView, bool)>>,
+    build_tooltip: Rc<dyn Fn(&mut Window, &mut App) -> Option<TooltipBuild>>,
     check_is_hovered: Rc<dyn Fn(&Window) -> bool>,
     check_is_hovered_during_prepaint: Rc<dyn Fn(&Window) -> bool>,
     show_delay: Option<Duration>,
@@ -3702,7 +3726,7 @@ pub(crate) fn register_tooltip_mouse_handlers(
 /// gets occluded after display, it will stick around until the mouse exits the hover bounds.
 fn handle_tooltip_mouse_move(
     active_tooltip: &Rc<RefCell<Option<ActiveTooltip>>>,
-    build_tooltip: &Rc<dyn Fn(&mut Window, &mut App) -> Option<(AnyView, bool)>>,
+    build_tooltip: &Rc<dyn Fn(&mut Window, &mut App) -> Option<TooltipBuild>>,
     check_is_hovered: &Rc<dyn Fn(&Window) -> bool>,
     check_is_hovered_during_prepaint: &Rc<dyn Fn(&Window) -> bool>,
     tooltip_id: Option<TooltipId>,
@@ -3779,12 +3803,13 @@ fn handle_tooltip_mouse_move(
                     };
                     cx.update(|window, cx| {
                         let new_tooltip =
-                            build_tooltip(window, cx).map(|(view, tooltip_is_hoverable)| {
+                            build_tooltip(window, cx).map(|(view, tooltip_is_hoverable, anchor_left_of)| {
                                 let weak_active_tooltip = Rc::downgrade(&active_tooltip);
                                 ActiveTooltip::Visible {
                                     tooltip: AnyTooltip {
                                         view,
                                         mouse_position: window.mouse_position(),
+                                        anchor_left_of,
                                         check_visible_and_update: Rc::new(
                                             move |tooltip_bounds, window, cx| {
                                                 let Some(active_tooltip) =

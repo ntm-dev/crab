@@ -793,7 +793,7 @@ impl Render for ActivityIndicator {
                             content.message.clone()
                         }
                     })
-                    .label_size(LabelSize::Small)
+                    .label_size(LabelSize::Default)
                     .tab_index(0isize)
                     .map(|this| match content.icon {
                         ActivityIcon::LoadingSpinner => this.loading(true),

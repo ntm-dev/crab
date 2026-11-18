@@ -40,7 +40,7 @@ impl Render for LineEndingIndicator {
         div().when_some(self.line_ending.as_ref(), |el, line_ending| {
             el.child(
                 Button::new("change-line-ending", line_ending.label())
-                    .label_size(LabelSize::Small)
+                    .label_size(LabelSize::Default)
                     .tab_index(0isize)
                     .on_click(cx.listener(|this, _, window, cx| {
                         if let Some(editor) = this.active_editor.as_ref() {

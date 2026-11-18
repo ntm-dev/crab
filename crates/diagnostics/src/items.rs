@@ -48,7 +48,7 @@ impl Render for DiagnosticIndicator {
                             .size(IconSize::Small)
                             .color(Color::Error),
                     )
-                    .child(Label::new(error_count.to_string()).size(LabelSize::Small))
+                    .child(Label::new(error_count.to_string()).size(LabelSize::Default))
                 })
                 .when(warning_count > 0, |this| {
                     this.child(
@@ -56,7 +56,7 @@ impl Render for DiagnosticIndicator {
                             .size(IconSize::Small)
                             .color(Color::Warning),
                     )
-                    .child(Label::new(warning_count.to_string()).size(LabelSize::Small))
+                    .child(Label::new(warning_count.to_string()).size(LabelSize::Default))
                 }),
         };
 
@@ -74,7 +74,7 @@ impl Render for DiagnosticIndicator {
             };
             Some(
                 Button::new("diagnostic_message", SharedString::new(message))
-                    .label_size(LabelSize::Small)
+                    .label_size(LabelSize::Default)
                     .truncate(true)
                     .tab_index(0isize)
                     .tooltip(move |_window, cx| {

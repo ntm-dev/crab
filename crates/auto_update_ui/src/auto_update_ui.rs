@@ -26,8 +26,77 @@ actions!(
     ]
 );
 
+struct NewVersionNotification;
+
+fn notify_on_new_version(cx: &mut App) {
+    let Some(updater) = AutoUpdater::get(cx) else {
+        return;
+    };
+    let mut last_notified: Option<(bool, Version)> = None;
+    cx.observe(&updater, move |updater, cx| {
+        let (ready, version) = match updater.read(cx).status() {
+            auto_update::AutoUpdateStatus::Downloading { version, .. } => (false, version),
+            auto_update::AutoUpdateStatus::Updated { version } => (true, version),
+            _ => return,
+        };
+        if last_notified.as_ref() == Some(&(ready, version.clone())) {
+            return;
+        }
+        last_notified = Some((ready, version.clone()));
+        show_new_version_notification(ready, version, cx);
+    })
+    .detach();
+}
+
+fn show_new_version_notification(ready: bool, version: Version, cx: &mut App) {
+    let app_name = ReleaseChannel::global(cx).display_name();
+    show_app_notification(
+        NotificationId::unique::<NewVersionNotification>(),
+        cx,
+        move |cx| {
+            let workspace_handle = cx.entity().downgrade();
+            let message = if ready {
+                t!(
+                    "{app_name} {version} is ready. Restart to update.",
+                    app_name = app_name,
+                    version = version
+                )
+            } else {
+                t!(
+                    "A new version {app_name} {version} is available. Downloading…",
+                    app_name = app_name,
+                    version = version
+                )
+            };
+            cx.new(|cx| {
+                let notification = MessageNotification::new(message, cx)
+                    .secondary_message(t!("View Release Notes"))
+                    .secondary_on_click(move |window, cx| {
+                        if let Some(workspace) = workspace_handle.upgrade() {
+                            workspace.update(cx, |workspace, cx| {
+                                crate::view_release_notes_locally(workspace, window, cx);
+                            })
+                        }
+                    })
+                    .show_suppress_button(false);
+                if ready {
+                    notification
+                        .primary_message(t!("Restart"))
+                        .primary_on_click(|_, cx| {
+                            workspace::reload(cx);
+                            cx.emit(DismissEvent);
+                        })
+                } else {
+                    notification
+                }
+            })
+        },
+    );
+}
+
 pub fn init(cx: &mut App) {
     notify_if_app_was_updated(cx);
+    notify_on_new_version(cx);
     cx.observe_new(|workspace: &mut Workspace, _window, cx| {
         workspace.register_action(|workspace, _: &ViewReleaseNotesLocally, window, cx| {
             view_release_notes_locally(workspace, window, cx);

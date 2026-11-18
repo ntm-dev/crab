@@ -1402,6 +1402,21 @@ mod element {
                         cx.theme().colors().pane_group_border,
                     ));
 
+                    let is_dragged = layout
+                        .dragged_handle
+                        .borrow()
+                        .is_some_and(|dragged_ix| dragged_ix == ix);
+                    if is_dragged || handle.hitbox.is_hovered(window) {
+                        window.paint_quad(gpui::quad(
+                            handle.hitbox.bounds,
+                            px(2.),
+                            cx.theme().colors().border_focused,
+                            px(0.),
+                            gpui::transparent_black(),
+                            BorderStyle::Solid,
+                        ));
+                    }
+
                     window.on_mouse_event({
                         let dragged_handle = layout.dragged_handle.clone();
                         let flexes = self.flexes.clone();

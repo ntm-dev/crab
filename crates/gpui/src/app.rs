@@ -2538,6 +2538,13 @@ impl App {
         self.active_drag.is_some()
     }
 
+    /// Returns the payload of the currently active drag if it is of type `T`.
+    pub fn active_drag_value<T: 'static>(&self) -> Option<&T> {
+        self.active_drag
+            .as_ref()
+            .and_then(|drag| drag.value.downcast_ref::<T>())
+    }
+
     /// Gets the cursor style of the currently active drag operation.
     pub fn active_drag_cursor_style(&self) -> Option<CursorStyle> {
         self.active_drag.as_ref().and_then(|drag| drag.cursor_style)
@@ -3023,6 +3030,10 @@ pub struct AnyTooltip {
 
     /// The absolute position of the mouse when the tooltip was deployed.
     pub mouse_position: Point<Pixels>,
+
+    /// When set, the tooltip is placed to the left of these bounds, vertically centered on them,
+    /// instead of next to the mouse. Falls back to the right side when there is no room.
+    pub anchor_left_of: Option<Bounds<Pixels>>,
 
     /// Given the bounds of the tooltip, checks whether the tooltip should still be visible and
     /// updates its state accordingly. This is needed atop the hovered element's mouse move handler

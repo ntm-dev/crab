@@ -3478,7 +3478,7 @@ impl Render for ActionArgumentsEditor {
 
         let text_style = {
             TextStyleRefinement {
-                font_size: Some(rems(0.875).into()),
+                font_size: Some(rems(1.).into()),
                 font_weight: Some(settings.buffer_font.weight),
                 line_height: Some(relative(1.2)),
                 color: self.is_loading.then_some(colors.text_disabled),

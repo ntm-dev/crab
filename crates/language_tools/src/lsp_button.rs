@@ -251,14 +251,14 @@ impl LanguageServerState {
                                 )
                                 .child(
                                     Label::new(t!("Project is in Restricted Mode"))
-                                        .size(LabelSize::Small),
+                                        .size(LabelSize::Default),
                                 ),
                         )
                         .child(
                             Label::new(t!(
                                 "Language Servers can't run until you trust this project."
                             ))
-                            .size(LabelSize::Small)
+                            .size(LabelSize::Default)
                             .color(Color::Muted),
                         )
                         .into_any_element()

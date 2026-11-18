@@ -90,7 +90,11 @@ pub struct TerminalPanel {
     active: bool,
     selected_terminals: Vec<EntityId>,
     selection_anchor: Option<EntityId>,
+    groups: Vec<Vec<EntityId>>,
+    displayed: Vec<EntityId>,
+    pending_split_source: Option<EntityId>,
     terminal_list_width: Option<Pixels>,
+    list_width_before_fit: Option<Option<Pixels>>,
     maximized_from: Option<Pixels>,
     show_problems: bool,
     problems_view: Option<Entity<diagnostics::ProblemsTable>>,
@@ -196,7 +200,11 @@ impl TerminalPanel {
             active: false,
             selected_terminals: Vec::new(),
             selection_anchor: None,
+            groups: Vec::new(),
+            displayed: Vec::new(),
+            pending_split_source: None,
             terminal_list_width: None,
+            list_width_before_fit: None,
             maximized_from: None,
             show_problems: false,
             problems_view: None,
@@ -383,6 +391,10 @@ impl TerminalPanel {
         cx: &mut Context<Self>,
     ) -> Option<Task<Result<WeakEntity<Terminal>>>> {
         self.restoring = false;
+        self.groups.clear();
+        self.displayed.clear();
+        self.sync_groups(cx);
+        self.displayed = self.pane_active_ids(cx);
         let has_terminals = self
             .center
             .panes()
@@ -536,7 +548,10 @@ impl TerminalPanel {
     ) {
         match event {
             pane::Event::ActivateItem { .. } => self.serialize(cx),
-            pane::Event::RemovedItem { .. } => self.serialize(cx),
+            pane::Event::RemovedItem { .. } => {
+                self.serialize(cx);
+                self.schedule_normalize(None, window, cx);
+            }
             pane::Event::Remove { focus_on_pane } => {
                 let pane_count_before_removal = self.center.panes().len();
                 let _removal_result = self.center.remove(pane, cx);
@@ -550,6 +565,7 @@ impl TerminalPanel {
                 {
                     focus_on_pane.focus_handle(cx).focus(window, cx);
                 }
+                self.schedule_normalize(None, window, cx);
             }
             pane::Event::ZoomIn => {
                 for pane in self.center.panes() {
@@ -576,21 +592,39 @@ impl TerminalPanel {
                     })
                 }
                 self.serialize(cx);
+                if !self.restoring {
+                    let id = item.item_id();
+                    let known = self.groups.iter().any(|group| group.contains(&id));
+                    let intent = (!known
+                        && self.pending_split_source.is_none()
+                        && !self.groups.is_empty())
+                    .then_some(id);
+                    self.schedule_normalize(intent, window, cx);
+                }
             }
             &pane::Event::Split { direction, mode } => {
                 match mode {
                     SplitMode::ClonePane | SplitMode::EmptyPane => {
                         let clone = matches!(mode, SplitMode::ClonePane);
+                        self.sync_groups(cx);
+                        self.pending_split_source = pane
+                            .read(cx)
+                            .active_item()
+                            .map(|item| item.item_id());
                         let new_pane = self.new_pane_with_active_terminal(clone, window, cx);
                         let pane = pane.clone();
                         cx.spawn_in(window, async move |panel, cx| {
                             let Some(new_pane) = new_pane.await else {
+                                panel
+                                    .update(cx, |panel, _| panel.pending_split_source = None)
+                                    .ok();
                                 return;
                             };
                             panel
                                 .update_in(cx, |panel, window, cx| {
                                     panel.center.split(&pane, &new_pane, direction, cx);
                                     window.focus(&new_pane.focus_handle(cx), cx);
+                                    panel.schedule_normalize(None, window, cx);
                                 })
                                 .ok();
                         })
@@ -1567,32 +1601,35 @@ impl workspace::Item for FailedToSpawnTerminal {
 impl EventEmitter<PanelEvent> for TerminalPanel {}
 
 impl TerminalPanel {
-    fn join_terminals(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.selected_terminals.len() < 2 {
-            return;
-        }
+    fn apply_layout(
+        &mut self,
+        selected: Vec<EntityId>,
+        active: EntityId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Ok(project) = self
             .workspace
             .update(cx, |workspace, _| workspace.project().clone())
         else {
             return;
         };
-        let selected = self.selected_terminals.clone();
+        self.displayed = selected.clone();
 
         let mut located = Vec::new();
-        for item_id in &selected {
-            for pane in self.center.panes() {
-                if let Some(ix) = pane
-                    .read(cx)
-                    .items()
-                    .position(|item| item.item_id() == *item_id)
-                {
-                    located.push((pane.clone(), ix, *item_id));
-                    break;
+        for (pane_ix, pane) in self.center.panes().into_iter().enumerate() {
+            for (ix, item) in pane.read(cx).items().enumerate() {
+                if selected.contains(&item.item_id()) {
+                    located.push((pane_ix, ix, pane.clone(), item.item_id()));
                 }
             }
         }
-        if located.len() < 2 {
+        located.sort_by_key(|(pane_ix, ix, _, _)| (*pane_ix, *ix));
+        let located: Vec<_> = located
+            .into_iter()
+            .map(|(_, ix, pane, item_id)| (pane, ix, item_id))
+            .collect();
+        if located.is_empty() {
             return;
         }
 
@@ -1648,15 +1685,187 @@ impl TerminalPanel {
                 );
             }
         }
-        if let Some(first) = selected.first() {
-            target.update(cx, |pane, cx| {
-                let ix = pane.items().position(|item| item.item_id() == *first);
-                if let Some(ix) = ix {
+        for pane in self.center.panes().into_iter().cloned().collect::<Vec<_>>() {
+            let ix = pane.read(cx).items().position(|item| item.item_id() == active);
+            if let Some(ix) = ix {
+                pane.update(cx, |pane, cx| {
                     pane.activate_item(ix, true, true, window, cx);
-                }
-            });
+                });
+                break;
+            }
         }
         self.serialize(cx);
+        cx.notify();
+    }
+
+    fn present_terminal_ids(&self, cx: &App) -> Vec<EntityId> {
+        self.center
+            .panes()
+            .into_iter()
+            .flat_map(|pane| pane.read(cx).items().map(|item| item.item_id()))
+            .collect()
+    }
+
+    fn pane_active_ids(&self, cx: &App) -> Vec<EntityId> {
+        self.center
+            .panes()
+            .into_iter()
+            .filter_map(|pane| pane.read(cx).active_item().map(|item| item.item_id()))
+            .collect()
+    }
+
+    fn sync_groups(&mut self, cx: &App) {
+        let present = self.present_terminal_ids(cx);
+        if self.groups.is_empty() {
+            if self.center.panes().len() > 1 {
+                let actives = self.pane_active_ids(cx);
+                self.groups.push(actives);
+            }
+        }
+        for group in &mut self.groups {
+            group.retain(|id| present.contains(id));
+        }
+        self.groups.retain(|group| !group.is_empty());
+        self.displayed.retain(|id| present.contains(id));
+        for id in present {
+            if self.groups.iter().any(|group| group.contains(&id)) {
+                continue;
+            }
+            let parent = self.pending_split_source.take().and_then(|source| {
+                self.groups
+                    .iter()
+                    .position(|group| group.contains(&source))
+                    .map(|group_ix| (group_ix, source))
+            });
+            match parent {
+                Some((group_ix, source)) => {
+                    let at = self.groups[group_ix]
+                        .iter()
+                        .position(|member| *member == source)
+                        .map_or(self.groups[group_ix].len(), |ix| ix + 1);
+                    self.groups[group_ix].insert(at, id);
+                }
+                None => self.groups.push(vec![id]),
+            }
+        }
+    }
+
+    fn group_index_of(&self, id: EntityId) -> Option<usize> {
+        self.groups.iter().position(|group| group.contains(&id))
+    }
+
+    fn normalize_layout(
+        &mut self,
+        intent: Option<EntityId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.restoring {
+            return;
+        }
+        self.sync_groups(cx);
+        let active_item = self
+            .active_pane
+            .read(cx)
+            .active_item()
+            .map(|item| item.item_id());
+        let (group_ix, anchor) = if let Some(intent) = intent {
+            let Some(group_ix) = self.group_index_of(intent) else {
+                return;
+            };
+            (group_ix, intent)
+        } else if let Some(group_ix) = self
+            .displayed
+            .first()
+            .and_then(|id| self.group_index_of(*id))
+        {
+            let group = &self.groups[group_ix];
+            let anchor = active_item
+                .filter(|id| group.contains(id))
+                .unwrap_or(group[0]);
+            (group_ix, anchor)
+        } else if let Some(active_item) = active_item {
+            let Some(group_ix) = self.group_index_of(active_item) else {
+                return;
+            };
+            (group_ix, active_item)
+        } else {
+            return;
+        };
+        let members = self.groups[group_ix].clone();
+        let mut actives = self.pane_active_ids(cx);
+        actives.sort();
+        let mut expected = members.clone();
+        expected.sort();
+        if actives == expected {
+            self.displayed = members;
+            return;
+        }
+        self.apply_layout(members, anchor, window, cx);
+    }
+
+    fn schedule_normalize(
+        &mut self,
+        intent: Option<EntityId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.defer_in(window, move |panel, window, cx| {
+            panel.normalize_layout(intent, window, cx);
+        });
+    }
+
+    fn join_terminals(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_terminals.len() < 2 {
+            return;
+        }
+        self.sync_groups(cx);
+        let flat: Vec<EntityId> = self.groups.iter().flatten().copied().collect();
+        let selected: Vec<EntityId> = flat
+            .into_iter()
+            .filter(|id| self.selected_terminals.contains(id))
+            .collect();
+        if selected.len() < 2 {
+            return;
+        }
+        let first = selected[0];
+        let first_was_single = self
+            .group_index_of(first)
+            .is_some_and(|ix| self.groups[ix].len() == 1);
+        let first_position = self.group_index_of(first).unwrap_or(0);
+        for group in &mut self.groups {
+            group.retain(|id| !selected.contains(id));
+        }
+        let insert_at = if first_was_single {
+            let kept_before = self.groups[..first_position.min(self.groups.len())]
+                .iter()
+                .filter(|group| !group.is_empty())
+                .count();
+            kept_before
+        } else {
+            usize::MAX
+        };
+        self.groups.retain(|group| !group.is_empty());
+        let insert_at = insert_at.min(self.groups.len());
+        self.groups.insert(insert_at, selected.clone());
+        self.apply_layout(selected, first, window, cx);
+    }
+
+    fn show_terminal(&mut self, item_id: EntityId, window: &mut Window, cx: &mut Context<Self>) {
+        self.normalize_layout(Some(item_id), window, cx);
+        for pane in self.center.panes().into_iter().cloned().collect::<Vec<_>>() {
+            let ix = pane
+                .read(cx)
+                .items()
+                .position(|item| item.item_id() == item_id);
+            if let Some(ix) = ix {
+                pane.update(cx, |pane, cx| {
+                    pane.activate_item(ix, true, true, window, cx);
+                });
+                self.active_pane = pane;
+                break;
+            }
+        }
         cx.notify();
     }
 
@@ -1664,8 +1873,6 @@ impl TerminalPanel {
         &mut self,
         item_id: EntityId,
         ordered_ids: &[EntityId],
-        pane: &Entity<Pane>,
-        ix: usize,
         modifiers: &Modifiers,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -1688,36 +1895,110 @@ impl TerminalPanel {
         } else {
             self.selected_terminals = vec![item_id];
             self.selection_anchor = Some(item_id);
-            pane.update(cx, |pane, cx| {
-                pane.activate_item(ix, true, true, window, cx);
-            });
+            self.show_terminal(item_id, window, cx);
         }
         cx.notify();
     }
 
-    /// Inverse of join: move the terminals of every other pane into the active pane as tabs.
-    fn unjoin_terminals(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let target = self.active_pane.clone();
-        for source in self.center.panes().into_iter().cloned().collect::<Vec<_>>() {
-            if source == target {
-                continue;
-            }
-            let item_ids: Vec<_> = source.read(cx).items().map(|item| item.item_id()).collect();
-            for item_id in item_ids {
-                let destination_index = target.read(cx).items_len();
-                workspace::move_item(
-                    &source,
-                    &target,
-                    item_id,
-                    destination_index,
-                    false,
-                    window,
-                    cx,
-                );
-            }
+    fn toggle_list_content_width(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(previous) = self.list_width_before_fit.take() {
+            self.terminal_list_width = previous;
+            cx.notify();
+            return;
         }
-        self.serialize(cx);
+        let settings = theme_settings::ThemeSettings::get_global(cx);
+        let font = settings.ui_font.clone();
+        let font_size = settings.ui_font_size(cx);
+        let color = cx.theme().colors().text;
+        let mut widest = Pixels::ZERO;
+        for (position, id) in self.groups.iter().flat_map(|group| {
+            let len = group.len();
+            group.iter().enumerate().map(move |(position, id)| ((position, len), *id))
+        }) {
+            let (position, len) = position;
+            let title = self.center.panes().into_iter().find_map(|pane| {
+                pane.read(cx)
+                    .items()
+                    .find(|item| item.item_id() == id)
+                    .map(|item| item.tab_content_text(1, cx))
+            });
+            let Some(title) = title else { continue };
+            let prefix = if len < 2 {
+                ""
+            } else if position == 0 {
+                "┌ "
+            } else if position + 1 == len {
+                "└ "
+            } else {
+                "├ "
+            };
+            let text: SharedString = format!(
+                "{prefix}{}",
+                title.split_whitespace().collect::<Vec<_>>().join(" ")
+            )
+            .into();
+            let run = gpui::TextRun {
+                len: text.len(),
+                font: font.clone(),
+                color,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            let width = window
+                .text_system()
+                .shape_line(text, font_size, &[run], None)
+                .width;
+            widest = widest.max(width);
+        }
+        let chrome = ui::scaled_px(10.).to_pixels(window.rem_size()) * 2.
+            + ui::scaled_px(16.).to_pixels(window.rem_size())
+            + ui::scaled_px(12.).to_pixels(window.rem_size());
+        let min_width = ui::scaled_px(46.).to_pixels(window.rem_size());
+        let max_width = window.viewport_size().width / 2.;
+        let fitted = (widest + chrome).max(min_width).min(max_width);
+        self.list_width_before_fit = Some(self.terminal_list_width);
+        self.terminal_list_width = Some(fitted);
         cx.notify();
+    }
+
+    fn split_active_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let pane = self.active_pane.clone();
+        pane.update(cx, |pane, cx| {
+            pane.split(SplitDirection::Right, SplitMode::default(), window, cx);
+        });
+    }
+
+    fn kill_active_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let pane = self.active_pane.clone();
+        let Some(item_id) = pane.read(cx).active_item().map(|item| item.item_id()) else {
+            return;
+        };
+        pane.update(cx, |pane, cx| {
+            pane.close_item_by_id(item_id, workspace::SaveIntent::Close, window, cx)
+                .detach_and_log_err(cx);
+        });
+    }
+
+    fn unjoin_terminal(&mut self, item_id: EntityId, window: &mut Window, cx: &mut Context<Self>) {
+        self.sync_groups(cx);
+        let Some(group_ix) = self.group_index_of(item_id) else {
+            return;
+        };
+        if self.groups[group_ix].len() < 2 {
+            return;
+        }
+        self.groups[group_ix].retain(|id| *id != item_id);
+        self.groups.push(vec![item_id]);
+        let members = self.groups[group_ix].clone();
+        let active = self
+            .active_pane
+            .read(cx)
+            .active_item()
+            .map(|item| item.item_id())
+            .filter(|id| members.contains(id))
+            .unwrap_or(members[0]);
+        self.apply_layout(members, active, window, cx);
     }
 
     /// VS Code-style terminal list shown on the right of the panel: one row per
@@ -1744,20 +2025,35 @@ impl TerminalPanel {
                     pane.clone(),
                     ix,
                     item.item_id(),
-                    item.tab_content_text(0, cx),
+                    item.tab_content_text(1, cx),
                     pane_is_active && ix == active_ix,
                     item.downcast::<TerminalView>(),
+                    ix == active_ix,
                 ));
             }
         }
-        let is_split_group = self.center.panes().len() > 1;
-        let entry_count = entries.len();
+        let mut ordered_entries = Vec::with_capacity(entries.len());
+        let mut group_positions = Vec::with_capacity(entries.len());
+        for group in &self.groups {
+            for (position, id) in group.iter().enumerate() {
+                if let Some(entry_ix) = entries.iter().position(|entry| entry.2 == *id) {
+                    ordered_entries.push(entries.remove(entry_ix));
+                    group_positions.push((position, group.len()));
+                }
+            }
+        }
+        for entry in entries {
+            ordered_entries.push(entry);
+            group_positions.push((0, 1));
+        }
+        let entries = ordered_entries;
+        let is_split_group = group_positions.iter().any(|(_, len)| *len > 1);
         let ordered_ids: Vec<EntityId> = entries.iter().map(|entry| entry.2).collect();
         let selected_terminals = self.selected_terminals.clone();
         let has_multi_selection = selected_terminals.len() > 1;
 
         let mut rows = Vec::new();
-        for (row_ix, (pane, ix, item_id, title, selected, terminal_view)) in
+        for (row_ix, (pane, ix, item_id, title, selected, terminal_view, _)) in
             entries.into_iter().enumerate()
         {
             let (row_icon, row_icon_color, rename_editor) = match &terminal_view {
@@ -1775,22 +2071,80 @@ impl TerminalPanel {
             };
             let menu_view = terminal_view.clone();
             let rename_view = terminal_view.clone();
-            let prefix = if !is_split_group || entry_count < 2 {
+            let (position, group_len) = group_positions[row_ix];
+            let prefix = if group_len < 2 {
                 ""
-            } else if row_ix == 0 {
+            } else if position == 0 {
                 "┌ "
-            } else if row_ix + 1 == entry_count {
+            } else if position + 1 == group_len {
                 "└ "
             } else {
                 "├ "
             };
             let group_name = SharedString::from(format!("terminal-list-group-{row_ix}"));
+            let tooltip_info = TerminalInfoTooltip {
+                title: title.clone(),
+                pid: None,
+                command_line: None,
+                working_directory: None,
+                shell_integration: false,
+                shell_type: None,
+                seen_sequences: Vec::new(),
+                show_details: false,
+                on_show_environment: std::rc::Rc::new(|_, _| {}),
+            };
+            let tooltip_info = match terminal_view.as_ref() {
+                Some(view) => {
+                    let terminal = view.read(cx).terminal().read(cx);
+                    let directory_name = terminal
+                        .working_directory()
+                        .and_then(|path| {
+                            path.file_name()
+                                .map(|name| name.to_string_lossy().into_owned())
+                        })
+                        .unwrap_or_else(|| title.to_string());
+                    let contributions = terminal.env_contributions().to_vec();
+                    let workspace = self.workspace.clone();
+                    TerminalInfoTooltip {
+                        on_show_environment: std::rc::Rc::new(move |window, cx| {
+                            open_environment_changes(
+                                workspace.clone(),
+                                directory_name.clone(),
+                                contributions.clone(),
+                                window,
+                                cx,
+                            );
+                        }),
+                        pid: terminal.pid().map(|pid| pid.as_u32()),
+                        command_line: terminal
+                            .shell_command_line()
+                            .or_else(|| terminal.foreground_command_line()),
+                        shell_type: terminal.shell_type(),
+                        seen_sequences: terminal.seen_sequences().to_vec(),
+                        working_directory: terminal
+                            .working_directory()
+                            .map(|path| path.to_string_lossy().into_owned()),
+                        shell_integration: terminal.shell_integration_injected(),
+                        ..tooltip_info
+                    }
+                }
+                None => tooltip_info,
+            };
+            let title: SharedString = title
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .into();
             let close_pane = pane.clone();
+            let split_pane = pane.clone();
             let menu_panel = panel.clone();
             let menu_pane = pane.clone();
-            let click_pane = pane.clone();
             let click_ids = ordered_ids.clone();
-            let selected = selected || selected_terminals.contains(&item_id);
+            let selected = if has_multi_selection {
+                selected_terminals.contains(&item_id)
+            } else {
+                selected
+            };
             let row = h_flex()
                 .id(("terminal-list-row", row_ix))
                 .group(group_name.clone())
@@ -1806,7 +2160,7 @@ impl TerminalPanel {
                     row.bg(colors.element_selected).child(
                         div()
                             .absolute()
-                            .left_0()
+                            .left(px(3.))
                             .top_0()
                             .bottom_0()
                             .w(px(1.))
@@ -1814,6 +2168,12 @@ impl TerminalPanel {
                     )
                 })
                 .hover(|row| row.bg(colors.element_hover))
+                .tooltip_left_of_element()
+                .tooltip_show_delay(std::time::Duration::from_millis(1000))
+                .hoverable_tooltip(move |_, cx| {
+                    let info = tooltip_info.clone();
+                    cx.new(|_| info).into()
+                })
                 .child(
                     Icon::new(row_icon)
                         .size(IconSize::Medium)
@@ -1834,7 +2194,16 @@ impl TerminalPanel {
                             (Some(editor), Some(rename_view)) => {
                                 let cancel_view = rename_view.clone();
                                 container
-                                    .child(editor)
+                                    .child(
+                                        div()
+                                            .w_full()
+                                            .px_1()
+                                            .bg(colors.editor_background)
+                                            .border_1()
+                                            .border_color(colors.border_focused)
+                                            .rounded_sm()
+                                            .child(editor),
+                                    )
                                     .on_action(move |_: &menu::Confirm, window, cx| {
                                         rename_view.update(cx, |view, cx| {
                                             view.finish_renaming(true, window, cx)
@@ -1879,9 +2248,17 @@ impl TerminalPanel {
                                     Color::Default
                                 })
                                 .tooltip(Tooltip::text(t!("Split Right")))
-                                .on_click(|_, window, cx| {
+                                .on_click(move |_, window, cx| {
                                     cx.stop_propagation();
-                                    window.dispatch_action(SplitRight::default().boxed_clone(), cx);
+                                    split_pane.update(cx, |pane, cx| {
+                                        pane.activate_item(ix, true, true, window, cx);
+                                        pane.split(
+                                            SplitDirection::Right,
+                                            SplitMode::default(),
+                                            window,
+                                            cx,
+                                        );
+                                    });
                                 }),
                         )
                         .child(
@@ -1911,8 +2288,6 @@ impl TerminalPanel {
                     panel.click_terminal_row(
                         item_id,
                         &click_ids,
-                        &click_pane,
-                        ix,
                         &event.modifiers(),
                         window,
                         cx,
@@ -1933,14 +2308,20 @@ impl TerminalPanel {
                                 move |window, cx| {
                                     pane.update(cx, |pane, cx| {
                                         pane.activate_item(ix, true, true, window, cx);
+                                        pane.split(
+                                            SplitDirection::Right,
+                                            SplitMode::default(),
+                                            window,
+                                            cx,
+                                        );
                                     });
-                                    window.dispatch_action(SplitRight::default().boxed_clone(), cx);
                                 }
                             })
                             .when_some(menu_view.clone(), |menu, view| {
                                 let rename_view = view.clone();
                                 let icon_view = view.clone();
                                 let color_view = view;
+                                let fit_panel = panel.clone();
                                 let icon_panel = panel.clone();
                                 let color_panel = panel.clone();
                                 menu.separator()
@@ -1949,6 +2330,17 @@ impl TerminalPanel {
                                             view.rename_terminal(&Default::default(), window, cx)
                                         });
                                     })
+                                    .entry(
+                                        t!("Toggle Size to Content Width"),
+                                        None,
+                                        move |window, cx| {
+                                            fit_panel
+                                                .update(cx, |panel, cx| {
+                                                    panel.toggle_list_content_width(window, cx)
+                                                })
+                                                .ok();
+                                        },
+                                    )
                                     .entry(t!("Change Icon..."), None, move |window, cx| {
                                         let view = icon_view.clone();
                                         icon_panel
@@ -1986,10 +2378,12 @@ impl TerminalPanel {
                                         .ok();
                                 })
                             })
-                            .when(!has_multi_selection && is_split_group, |menu| {
+                            .when(!has_multi_selection && group_len > 1, |menu| {
                                 menu.entry(t!("Unjoin Terminals"), None, move |window, cx| {
                                     unjoin_panel
-                                        .update(cx, |panel, cx| panel.unjoin_terminals(window, cx))
+                                        .update(cx, |panel, cx| {
+                                            panel.unjoin_terminal(item_id, window, cx)
+                                        })
                                         .ok();
                                 })
                             })
@@ -2014,23 +2408,56 @@ impl TerminalPanel {
         }
 
         let sash_color = colors.border_focused;
+        let dragging = cx.active_drag_value::<DraggedTerminalList>().is_some();
         v_flex()
             .relative()
             .h_full()
             .w(list_width)
             .flex_none()
-            .border_l_1()
-            .border_color(colors.border)
+            .pl(px(1.))
+            .child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .top_0()
+                    .bottom_0()
+                    .w(px(1.))
+                    .bg(colors.border),
+            )
             .child(
                 div()
                     .id("terminal-list-resize-handle")
+                    .group("terminal-list-sash")
                     .absolute()
                     .left(px(-2.))
                     .top_0()
                     .bottom_0()
                     .w(px(4.))
+                    .flex()
+                    .justify_center()
                     .cursor_col_resize()
-                    .hover(move |style| style.bg(sash_color))
+                    .child(
+                        div()
+                            .id("terminal-list-sash")
+                            .h_full()
+                            .w(px(4.))
+                            .rounded(px(2.))
+                            .group_hover("terminal-list-sash", move |style| style.bg(sash_color))
+                            .when(dragging, move |style| style.bg(sash_color)),
+                    )
+                    .on_mouse_up(
+                        gpui::MouseButton::Left,
+                        cx.listener(|_, _, _, cx| cx.notify()),
+                    )
+                    .on_mouse_up_out(
+                        gpui::MouseButton::Left,
+                        cx.listener(|_, _, _, cx| cx.notify()),
+                    )
+                    .on_click(cx.listener(|panel, event: &ClickEvent, window, cx| {
+                        if event.click_count() == 2 {
+                            panel.toggle_list_content_width(window, cx);
+                        }
+                    }))
                     .on_drag(DraggedTerminalList, |dragged, _, _, cx| {
                         cx.new(|_| dragged.clone())
                     }),
@@ -2366,21 +2793,28 @@ impl TerminalPanel {
                                     .tooltip(Tooltip::text(t!("Views and More Actions…"))),
                             )
                             .anchor(Anchor::TopRight)
-                            .menu(|window, cx| {
-                                Some(ContextMenu::build(window, cx, |menu, _, _| {
-                                    menu.action(
-                                        t!("Split Terminal"),
-                                        SplitRight::default().boxed_clone(),
-                                    )
-                                    .action(
-                                        t!("Kill Terminal"),
-                                        workspace::CloseActiveItem {
-                                            save_intent: None,
-                                            close_pinned: false,
-                                        }
-                                        .boxed_clone(),
-                                    )
-                                }))
+                            .menu({
+                                let panel = cx.entity().downgrade();
+                                move |window, cx| {
+                                    let split_panel = panel.clone();
+                                    let kill_panel = panel.clone();
+                                    Some(ContextMenu::build(window, cx, move |menu, _, _| {
+                                        menu.entry(t!("Split Terminal"), None, move |window, cx| {
+                                            split_panel
+                                                .update(cx, |panel, cx| {
+                                                    panel.split_active_terminal(window, cx)
+                                                })
+                                                .ok();
+                                        })
+                                        .entry(t!("Kill Terminal"), None, move |window, cx| {
+                                            kill_panel
+                                                .update(cx, |panel, cx| {
+                                                    panel.kill_active_terminal(window, cx)
+                                                })
+                                                .ok();
+                                        })
+                                    }))
+                                }
                             }),
                     )
                     )
@@ -2420,6 +2854,209 @@ impl TerminalPanel {
 #[derive(Clone)]
 struct DraggedTerminalList;
 
+fn open_environment_changes(
+    workspace: WeakEntity<Workspace>,
+    directory_name: String,
+    contributions: Vec<(String, String)>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let Some(workspace_entity) = workspace.upgrade() else {
+        return;
+    };
+    let title = format!("Environment changes - {directory_name}");
+    let mut text = String::from("# Terminal Environment Changes\n\n");
+    if contributions.is_empty() {
+        text.push_str("Nothing has contributed to this terminal's environment.\n");
+    } else {
+        text.push_str("## Crab shell integration\n\n");
+        text.push_str("Enables shell integration by modifying `ZDOTDIR`\n\n");
+        for (name, value) in &contributions {
+            text.push_str(&format!("- `{name}={value}`\n"));
+        }
+    }
+    let language = workspace_entity
+        .read(cx)
+        .app_state()
+        .languages
+        .language_for_name("Markdown");
+    window
+        .spawn(cx, async move |cx| {
+            let language = language.await.log_err();
+            let (buffer, project) = workspace.update(cx, |workspace, cx| {
+                let project = workspace.project().clone();
+                let buffer =
+                    project.update(cx, |project, cx| project.create_buffer(language, false, cx));
+                (buffer, project)
+            })?;
+            let buffer = buffer.await?;
+            buffer.update(cx, |buffer, cx| {
+                buffer.set_text(text, cx);
+                buffer.set_capability(language::Capability::ReadOnly, cx);
+            });
+            let multi_buffer = cx.new(|cx| {
+                editor::MultiBuffer::singleton(buffer, cx).with_title(title.clone())
+            });
+            workspace.update_in(cx, |workspace, window, cx| {
+                workspace.add_item_to_active_pane(
+                    Box::new(cx.new(|cx| {
+                        let mut editor =
+                            editor::Editor::for_multibuffer(multi_buffer, Some(project), window, cx);
+                        editor.set_read_only(true);
+                        editor.set_should_serialize(false, cx);
+                        editor
+                    })),
+                    None,
+                    true,
+                    window,
+                    cx,
+                )
+            })?;
+            anyhow::Ok(())
+        })
+        .detach_and_log_err(cx);
+}
+
+#[derive(Clone)]
+struct TerminalInfoTooltip {
+    title: SharedString,
+    pid: Option<u32>,
+    command_line: Option<String>,
+    working_directory: Option<String>,
+    shell_integration: bool,
+    shell_type: Option<String>,
+    seen_sequences: Vec<&'static str>,
+    show_details: bool,
+    on_show_environment: std::rc::Rc<dyn Fn(&mut Window, &mut App)>,
+}
+
+impl Render for TerminalInfoTooltip {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = cx.theme().colors().clone();
+        let ui_font = theme_settings::ThemeSettings::get_global(cx).ui_font.clone();
+        let mode = if self.shell_integration { "Rich" } else { "None" };
+        let link = |id: &'static str, label: SharedString, color: gpui::Hsla| {
+            div()
+                .id(id)
+                .cursor_pointer()
+                .text_color(color)
+                .hover(|style| style.underline())
+                .child(label)
+        };
+        let link_color = colors.text_accent;
+
+        let popup_bg: gpui::Hsla = gpui::rgb(0x31363A).into();
+        let popup_border: gpui::Hsla = gpui::rgb(0x40454C).into();
+        let popup_footer_bg: gpui::Hsla = gpui::rgb(0x383D41).into();
+        let arrow_fill = popup_bg;
+        let arrow_border = popup_border;
+        let arrow = gpui::canvas(
+            |_, _, _| {},
+            move |bounds, _, window, _| {
+                let mut triangle = |inset: Pixels, base: Pixels, color: gpui::Hsla| {
+                    let mut builder = gpui::PathBuilder::fill();
+                    builder.move_to(gpui::point(bounds.left() - base, bounds.top() + inset));
+                    builder.line_to(gpui::point(
+                        bounds.left() + px(4.) - inset,
+                        bounds.center().y,
+                    ));
+                    builder.line_to(gpui::point(bounds.left() - base, bounds.bottom() - inset));
+                    builder.close();
+                    if let Ok(path) = builder.build() {
+                        window.paint_path(path, color);
+                    }
+                };
+                triangle(px(0.), px(1.), arrow_border);
+                triangle(px(1.), px(1.5), arrow_fill);
+            },
+        )
+        .w(px(0.))
+        .h(px(8.));
+
+        h_flex().items_center().child(
+            v_flex()
+                .elevation_2(cx)
+                .bg(popup_bg)
+                .border_color(popup_border)
+                .font(ui_font)
+                .text_ui(cx)
+                .text_color(colors.text)
+                .max_w(px(520.))
+                .overflow_hidden()
+                .child(
+                    v_flex()
+                        .gap_3()
+                        .px_3()
+                        .py_2p5()
+                        .child(div().child(self.title.clone()))
+                        .when_some(self.pid, |this, pid| {
+                            this.child(div().child(t!("Process ID (PID): {pid}", pid = pid)))
+                        })
+                        .when_some(self.command_line.clone(), |this, command| {
+                            this.child(div().child(t!("Command line: {command}", command = command)))
+                        })
+                        .child(div().child(t!("Shell integration: {mode}", mode = mode)))
+                        .when(self.show_details, |this| {
+                            this.child(
+                                v_flex()
+                                    .when_some(self.shell_type.clone(), |this, shell| {
+                                        this.child(div().child(t!(
+                                            "Shell type: {shell}",
+                                            shell = shell
+                                        )))
+                                    })
+                                    .when_some(self.working_directory.clone(), |this, cwd| {
+                                        this.child(div().child(t!(
+                                            "Current working directory: {path}",
+                                            path = cwd
+                                        )))
+                                    })
+                                    .when(!self.seen_sequences.is_empty(), |this| {
+                                        this.child(div().child(t!(
+                                            "Seen sequences: {sequences}",
+                                            sequences = self.seen_sequences.join(", ")
+                                        )))
+                                    }),
+                            )
+                        }),
+                )
+                .child(
+                    h_flex()
+                        .gap_4()
+                        .px_3()
+                        .py_1()
+                        .bg(popup_footer_bg)
+                        .child(
+                            link(
+                                "terminal-tooltip-environment",
+                                t!("Show Environment Contributions").into(),
+                                link_color,
+                            )
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                (this.on_show_environment)(window, cx);
+                            })),
+                        )
+                        .child(
+                            link(
+                                "terminal-tooltip-details",
+                                if self.show_details {
+                                    t!("Hide Details").into()
+                                } else {
+                                    t!("Show Details").into()
+                                },
+                                link_color,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.show_details = !this.show_details;
+                                cx.notify();
+                            })),
+                        ),
+                ),
+        )
+        .child(arrow)
+    }
+}
+
 impl Render for DraggedTerminalList {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         gpui::Empty
@@ -2439,6 +3076,7 @@ impl Render for TerminalPanel {
                 cx.notify();
             },
         );
+        self.sync_groups(cx);
         let terminal_list = self.render_terminal_list(window, cx);
         let panel_header = self.render_panel_header(window, cx);
         let panel_header = {
@@ -3397,6 +4035,7 @@ mod tests {
             assert_eq!(pane.items_len(), 1);
             pane.active_item().unwrap().item_id()
         });
+        terminal_panel.update(cx, |terminal_panel, _| terminal_panel.restoring = true);
 
         let restored_items = window_handle
             .update(cx, |multi_workspace, window, cx| {
@@ -3417,6 +4056,14 @@ mod tests {
             })
             .unwrap()
             .await
+            .unwrap();
+        cx.run_until_parked();
+        window_handle
+            .update(cx, |_, window, cx| {
+                terminal_panel.update(cx, |terminal_panel, cx| {
+                    terminal_panel.finish_restoration(true, window, cx);
+                })
+            })
             .unwrap();
         cx.run_until_parked();
 
@@ -4377,6 +5024,361 @@ mod tests {
             center_items_after, center_items_before,
             "Center pane should not gain a new terminal when panel is focused"
         );
+    }
+
+    fn group_state(panel: &TerminalPanel, cx: &App) -> Vec<(Vec<EntityId>, EntityId)> {
+        panel
+            .center
+            .panes()
+            .into_iter()
+            .map(|pane| {
+                let pane = pane.read(cx);
+                (
+                    pane.items().map(|item| item.item_id()).collect(),
+                    pane.active_item().unwrap().item_id(),
+                )
+            })
+            .collect()
+    }
+
+    #[gpui::test]
+    async fn test_join_and_unjoin_selected_terminals(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let window_handle =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let terminal_panel = window_handle
+            .update(cx, |multi_workspace, window, cx| {
+                multi_workspace.workspace().update(cx, |workspace, cx| {
+                    cx.new(|cx| TerminalPanel::new(workspace, window, cx))
+                })
+            })
+            .unwrap();
+
+        for _ in 0..4 {
+            window_handle
+                .update(cx, |_, window, cx| {
+                    terminal_panel.update(cx, |panel, cx| {
+                        panel.add_terminal_shell(false, None, RevealStrategy::Always, window, cx)
+                    })
+                })
+                .unwrap()
+                .await
+                .unwrap();
+        }
+        cx.run_until_parked();
+
+        let ids: Vec<EntityId> = terminal_panel.read_with(cx, |panel, cx| {
+            panel.active_pane.read(cx).items().map(|i| i.item_id()).collect()
+        });
+        assert_eq!(ids.len(), 4);
+
+        terminal_panel.update(cx, |panel, _| {
+            panel.selected_terminals = vec![ids[0], ids[2]];
+        });
+        window_handle
+            .update(cx, |_, window, cx| {
+                terminal_panel.update(cx, |panel, cx| panel.join_terminals(window, cx))
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        terminal_panel.read_with(cx, |panel, cx| {
+            let state = group_state(panel, cx);
+            let mut active: Vec<EntityId> = state.iter().map(|(_, active)| *active).collect();
+            active.sort();
+            let mut expected = vec![ids[0], ids[2]];
+            expected.sort();
+            assert_eq!(state.len(), 2, "{state:?}");
+            assert_eq!(active, expected, "joined terminals must be the visible group");
+            let total: usize = state.iter().map(|(items, _)| items.len()).sum();
+            assert_eq!(total, 4);
+        });
+
+        let item_id = terminal_panel.read_with(cx, |panel, cx| {
+            panel.center.panes()[1]
+                .read(cx)
+                .active_item()
+                .unwrap()
+                .item_id()
+        });
+        window_handle
+            .update(cx, |_, window, cx| {
+                terminal_panel.update(cx, |panel, cx| panel.unjoin_terminal(item_id, window, cx))
+            })
+            .unwrap();
+        cx.run_until_parked();
+        terminal_panel.read_with(cx, |panel, cx| {
+            let state = group_state(panel, cx);
+            assert_eq!(state.len(), 1, "{state:?}");
+            assert_eq!(state[0].0.len(), 4);
+        });
+    }
+
+    #[gpui::test]
+    async fn test_join_sequences_show_exactly_selected(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let window_handle =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let terminal_panel = window_handle
+            .update(cx, |multi_workspace, window, cx| {
+                multi_workspace.workspace().update(cx, |workspace, cx| {
+                    cx.new(|cx| TerminalPanel::new(workspace, window, cx))
+                })
+            })
+            .unwrap();
+
+        for _ in 0..5 {
+            window_handle
+                .update(cx, |_, window, cx| {
+                    terminal_panel.update(cx, |panel, cx| {
+                        panel.add_terminal_shell(false, None, RevealStrategy::Always, window, cx)
+                    })
+                })
+                .unwrap()
+                .await
+                .unwrap();
+        }
+        cx.run_until_parked();
+        let ids: Vec<EntityId> = terminal_panel.read_with(cx, |panel, cx| {
+            panel.active_pane.read(cx).items().map(|i| i.item_id()).collect()
+        });
+
+        let sequences: Vec<Vec<usize>> = vec![
+            vec![0, 2],
+            vec![1, 3],
+            vec![4, 0, 3],
+            vec![2, 3],
+            vec![0, 1, 2, 3, 4],
+            vec![3, 1],
+            vec![4, 2],
+        ];
+        for sequence in sequences {
+            let selection: Vec<EntityId> = sequence.iter().map(|ix| ids[*ix]).collect();
+            terminal_panel.update(cx, |panel, _| {
+                panel.selected_terminals = selection.clone();
+            });
+            window_handle
+                .update(cx, |_, window, cx| {
+                    terminal_panel.update(cx, |panel, cx| panel.join_terminals(window, cx))
+                })
+                .unwrap();
+            cx.run_until_parked();
+            terminal_panel.read_with(cx, |panel, cx| {
+                let state = group_state(panel, cx);
+                let actives: Vec<EntityId> = state.iter().map(|(_, active)| *active).collect();
+                let mut sorted_actives = actives.clone();
+                sorted_actives.sort();
+                let mut sorted_selection = selection.clone();
+                sorted_selection.sort();
+                assert_eq!(
+                    sorted_actives, sorted_selection,
+                    "sequence {sequence:?}: visible group must equal selection, state {state:?}"
+                );
+                let total: usize = state.iter().map(|(items, _)| items.len()).sum();
+                assert_eq!(total, 5, "sequence {sequence:?}: no terminal lost");
+            });
+        }
+    }
+
+    #[gpui::test]
+    async fn test_unjoin_removes_only_one_member(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let window_handle =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let terminal_panel = window_handle
+            .update(cx, |multi_workspace, window, cx| {
+                multi_workspace.workspace().update(cx, |workspace, cx| {
+                    cx.new(|cx| TerminalPanel::new(workspace, window, cx))
+                })
+            })
+            .unwrap();
+        for _ in 0..5 {
+            window_handle
+                .update(cx, |_, window, cx| {
+                    terminal_panel.update(cx, |panel, cx| {
+                        panel.add_terminal_shell(false, None, RevealStrategy::Always, window, cx)
+                    })
+                })
+                .unwrap()
+                .await
+                .unwrap();
+        }
+        cx.run_until_parked();
+        let ids: Vec<EntityId> = terminal_panel.read_with(cx, |panel, cx| {
+            panel.active_pane.read(cx).items().map(|i| i.item_id()).collect()
+        });
+        terminal_panel.update(cx, |panel, _| {
+            panel.selected_terminals = vec![ids[0], ids[1], ids[2], ids[3]];
+        });
+        window_handle
+            .update(cx, |_, window, cx| {
+                terminal_panel.update(cx, |panel, cx| panel.join_terminals(window, cx))
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        for expected_visible in [3usize, 2] {
+            let item_id = terminal_panel.read_with(cx, |panel, cx| {
+                panel.center.panes()[1]
+                    .read(cx)
+                    .active_item()
+                    .unwrap()
+                    .item_id()
+            });
+            window_handle
+                .update(cx, |_, window, cx| {
+                    terminal_panel
+                        .update(cx, |panel, cx| panel.unjoin_terminal(item_id, window, cx))
+                })
+                .unwrap();
+            cx.run_until_parked();
+            terminal_panel.read_with(cx, |panel, cx| {
+                let state = group_state(panel, cx);
+                assert_eq!(state.len(), expected_visible, "{state:?}");
+                let total: usize = state.iter().map(|(items, _)| items.len()).sum();
+                assert_eq!(total, 5);
+            });
+        }
+    }
+
+    #[gpui::test]
+    async fn test_clicking_other_group_switches_group_without_merging(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let window_handle =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let terminal_panel = window_handle
+            .update(cx, |multi_workspace, window, cx| {
+                multi_workspace.workspace().update(cx, |workspace, cx| {
+                    cx.new(|cx| TerminalPanel::new(workspace, window, cx))
+                })
+            })
+            .unwrap();
+        for _ in 0..4 {
+            window_handle
+                .update(cx, |_, window, cx| {
+                    terminal_panel.update(cx, |panel, cx| {
+                        panel.add_terminal_shell(false, None, RevealStrategy::Always, window, cx)
+                    })
+                })
+                .unwrap()
+                .await
+                .unwrap();
+            cx.run_until_parked();
+        }
+        let ids: Vec<EntityId> = terminal_panel.read_with(cx, |panel, cx| {
+            let mut ids = panel.present_terminal_ids(cx);
+            ids.sort_by_key(|id| {
+                panel
+                    .groups
+                    .iter()
+                    .position(|group| group.contains(id))
+                    .unwrap()
+            });
+            ids
+        });
+        terminal_panel.read_with(cx, |panel, cx| {
+            let state = group_state(panel, cx);
+            assert_eq!(state.len(), 1, "new terminals must not split: {state:?}");
+            assert_eq!(panel.groups.len(), 4);
+        });
+
+        terminal_panel.update(cx, |panel, _| {
+            panel.selected_terminals = vec![ids[0], ids[1]];
+        });
+        window_handle
+            .update(cx, |_, window, cx| {
+                terminal_panel.update(cx, |panel, cx| panel.join_terminals(window, cx))
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        for (target, expected_visible) in [(ids[2], 1usize), (ids[0], 2), (ids[3], 1), (ids[1], 2)]
+        {
+            window_handle
+                .update(cx, |_, window, cx| {
+                    terminal_panel.update(cx, |panel, cx| panel.show_terminal(target, window, cx))
+                })
+                .unwrap();
+            cx.run_until_parked();
+            terminal_panel.read_with(cx, |panel, cx| {
+                let state = group_state(panel, cx);
+                assert_eq!(state.len(), expected_visible, "{state:?}");
+                assert!(
+                    panel.pane_active_ids(cx).contains(&target),
+                    "target must be visible: {state:?}"
+                );
+                let joined = panel.group_index_of(ids[0]) == panel.group_index_of(ids[1]);
+                assert!(joined, "group membership must not change when switching");
+                assert_eq!(panel.groups.len(), 3);
+            });
+        }
+    }
+
+    #[gpui::test]
+    async fn test_split_and_kill_active_terminal(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let window_handle =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let terminal_panel = window_handle
+            .update(cx, |multi_workspace, window, cx| {
+                multi_workspace.workspace().update(cx, |workspace, cx| {
+                    cx.new(|cx| TerminalPanel::new(workspace, window, cx))
+                })
+            })
+            .unwrap();
+        for _ in 0..2 {
+            window_handle
+                .update(cx, |_, window, cx| {
+                    terminal_panel.update(cx, |panel, cx| {
+                        panel.add_terminal_shell(false, None, RevealStrategy::Always, window, cx)
+                    })
+                })
+                .unwrap()
+                .await
+                .unwrap();
+            cx.run_until_parked();
+        }
+
+        window_handle
+            .update(cx, |_, window, cx| {
+                terminal_panel.update(cx, |panel, cx| panel.split_active_terminal(window, cx))
+            })
+            .unwrap();
+        cx.run_until_parked();
+        terminal_panel.read_with(cx, |panel, cx| {
+            assert_eq!(panel.present_terminal_ids(cx).len(), 3);
+            assert_eq!(panel.center.panes().len(), 2);
+        });
+
+        window_handle
+            .update(cx, |_, window, cx| {
+                terminal_panel.update(cx, |panel, cx| panel.kill_active_terminal(window, cx))
+            })
+            .unwrap();
+        cx.run_until_parked();
+        terminal_panel.read_with(cx, |panel, cx| {
+            assert_eq!(panel.present_terminal_ids(cx).len(), 2);
+        });
     }
 
     fn set_max_tabs(cx: &mut TestAppContext, value: Option<usize>) {
