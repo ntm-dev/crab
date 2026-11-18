@@ -528,10 +528,6 @@ impl TitleBar {
         }
     }
 
-    fn worktree_count(&self, cx: &App) -> usize {
-        self.project.read(cx).visible_worktrees(cx).count()
-    }
-
     fn toggle_update_simulation(&mut self, cx: &mut Context<Self>) {
         self.update_version
             .update(cx, |banner, cx| banner.update_simulation(cx));
