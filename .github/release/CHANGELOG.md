@@ -4,6 +4,15 @@ All notable user-facing changes to Crab are listed here, newest first.
 
 ## Unreleased
 
+## 1.0.2 - 2026-11-18
+
+- A notification appears when a new version is available or ready to install, with a Restart button.
+- Files with a warning are yellow (`rgb(204, 167, 0)`) and modified files without a warning are `rgb(226, 192, 141)`, in the Explorer and in editor tabs.
+- Title bar and status bar text use the general font size. The title bar can be dragged to move the window, and the project name button shows a chevron.
+- Placeholder and input text in the editor, search bar, keymap editor and extensions page use the general font size.
+- The zoom icon in the status bar is larger and centered in its button.
+- Terminal list tooltip uses VS Code colors and a smaller arrow centered on the divider.
+- Git change marks in the editor gutter no longer spill outside the rounded editor corners.
 - "Check for Updates" is in the Help menu on Windows and Linux (the Crab menu on macOS) and works even when auto-update is off. It now reports when you are up to date.
 - The `ZED_UPDATE_EXPLANATION` environment variable is now `CRAB_UPDATE_EXPLANATION`.
 

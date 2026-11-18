@@ -2,7 +2,7 @@
 description = "The fast, native VSCode alternative."
 edition.workspace = true
 name = "crab"
-version = "1.0.1"
+version = "1.0.2"
 publish.workspace = true
 license = "GPL-3.0-or-later"
 default-run = "crab"
