@@ -2,5 +2,6 @@
   "Updated to {app_name} {version}": "Đã cập nhật lên {app_name} {version}",
   "{app_name} {version} is ready. Restart to update.": "{app_name} {version} đã sẵn sàng. Khởi động lại để cập nhật.",
   "A new version {app_name} {version} is available. Downloading…": "Có phiên bản mới {app_name} {version}. Đang tải xuống…",
+  "There are currently no updates available. {app_name} {version} is the latest version.": "Hiện chưa có bản cập nhật nào. {app_name} {version} là phiên bản mới nhất.",
   "View Release Notes": "Xem ghi chú phát hành"
 }

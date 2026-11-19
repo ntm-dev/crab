@@ -33,6 +33,12 @@ fn notify_on_new_version(cx: &mut App) {
         return;
     };
     let mut last_notified: Option<(bool, Version)> = None;
+    cx.subscribe(&updater, |_, event, cx| match event {
+        auto_update::AutoUpdaterEvent::UpToDate { version } => {
+            show_up_to_date_notification(version.clone(), cx);
+        }
+    })
+    .detach();
     cx.observe(&updater, move |updater, cx| {
         let (ready, version) = match updater.read(cx).status() {
             auto_update::AutoUpdateStatus::Downloading { version, .. } => (false, version),
@@ -46,6 +52,24 @@ fn notify_on_new_version(cx: &mut App) {
         show_new_version_notification(ready, version, cx);
     })
     .detach();
+}
+
+struct UpToDateNotification;
+
+fn show_up_to_date_notification(version: Version, cx: &mut App) {
+    let app_name = ReleaseChannel::global(cx).display_name();
+    show_app_notification(
+        NotificationId::unique::<UpToDateNotification>(),
+        cx,
+        move |cx| {
+            let message = t!(
+                "There are currently no updates available. {app_name} {version} is the latest version.",
+                app_name = app_name,
+                version = version
+            );
+            cx.new(|cx| MessageNotification::new(message, cx).show_suppress_button(false))
+        },
+    );
 }
 
 fn show_new_version_notification(ready: bool, version: Version, cx: &mut App) {

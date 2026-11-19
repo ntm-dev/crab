@@ -3,8 +3,8 @@ use client::Client;
 use db::kvp::KeyValueStore;
 use futures_lite::StreamExt;
 use gpui::{
-    App, AppContext as _, AsyncApp, BackgroundExecutor, Context, Entity, Global, PromptButton,
-    Task, TaskExt, Window, actions,
+    App, AppContext as _, AsyncApp, BackgroundExecutor, Context, Entity, EventEmitter, Global,
+    PromptButton, Task, TaskExt, Window, actions,
 };
 use http_client::{HttpClient, HttpClientWithUrl};
 use i18n::t;
@@ -212,6 +212,13 @@ impl AutoUpdateStatus {
     }
 }
 
+#[derive(Clone, Debug)]
+pub enum AutoUpdaterEvent {
+    UpToDate { version: Version },
+}
+
+impl EventEmitter<AutoUpdaterEvent> for AutoUpdater {}
+
 pub struct AutoUpdater {
     status: AutoUpdateStatus,
     current_version: Version,
@@ -399,6 +406,14 @@ pub fn check(_: &Check, window: &mut Window, cx: &mut App) {
     }
 
     if let Some(updater) = AutoUpdater::get(cx) {
+        if matches!(
+            updater.read(cx).status(),
+            AutoUpdateStatus::Checking
+                | AutoUpdateStatus::Downloading { .. }
+                | AutoUpdateStatus::Installing { .. }
+        ) {
+            return;
+        }
         updater.update(cx, |updater, cx| updater.poll(UpdateCheckType::Manual, cx));
     } else {
         drop(window.prompt(
@@ -621,22 +636,7 @@ impl AutoUpdater {
                     cx.notify();
                 } else if check_type.is_manual() && matches!(this.status, AutoUpdateStatus::Idle) {
                     let version = this.current_version.clone();
-                    if let Some(window) = cx.active_window() {
-                        window
-                            .update(cx, |_, window, cx| {
-                                drop(window.prompt(
-                                    gpui::PromptLevel::Info,
-                                    &t!("There are currently no updates available."),
-                                    Some(&t!(
-                                        "Crab {version} is the latest version.",
-                                        version = version
-                                    )),
-                                    &[PromptButton::ok(t!("OK"))],
-                                    cx,
-                                ));
-                            })
-                            .ok();
-                    }
+                    cx.emit(AutoUpdaterEvent::UpToDate { version });
                 }
             })
             .ok()

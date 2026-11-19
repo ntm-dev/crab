@@ -1,5 +1,6 @@
 use gpui::{
-    App, Decorations, Entity, EventEmitter, FocusHandle, Focusable, PromptButton, PromptHandle,
+    App, Decorations, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, PromptButton,
+    PromptHandle,
     PromptLevel, PromptResponse, RenderablePromptHandle, SharedString, TextStyleRefinement, Window,
     div, prelude::*,
 };
@@ -39,7 +40,7 @@ fn zed_prompt_renderer(
 ) -> RenderablePromptHandle {
     let renderer = cx.new({
         |cx| ZedPromptRenderer {
-            _level: level,
+            level,
             message: cx.new(|cx| Markdown::new(SharedString::new(message), None, None, cx)),
             actions: actions.iter().map(|a| a.label().to_string()).collect(),
             cancel_action_id: actions.iter().position(PromptButton::is_cancel),
@@ -55,7 +56,7 @@ fn zed_prompt_renderer(
 }
 
 pub struct ZedPromptRenderer {
-    _level: PromptLevel,
+    level: PromptLevel,
     message: Entity<Markdown>,
     actions: Vec<String>,
     cancel_action_id: Option<usize>,
@@ -114,6 +115,12 @@ impl Render for ZedPromptRenderer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let settings = ThemeSettings::get_global(cx);
 
+        let (icon_name, icon_color) = match self.level {
+            PromptLevel::Info => (IconName::Info, Color::Accent),
+            PromptLevel::Warning => (IconName::Warning, Color::Warning),
+            PromptLevel::Critical => (IconName::XCircle, Color::Error),
+        };
+
         let dialog = v_flex()
             .key_context("Prompt")
             .cursor_default()
@@ -124,28 +131,54 @@ impl Render for ZedPromptRenderer {
             .on_action(cx.listener(Self::select_previous))
             .on_action(cx.listener(Self::select_first))
             .on_action(cx.listener(Self::select_last))
-            .w_80()
-            .p_4()
+            .w(px(440.))
+            .p_5()
             .gap_4()
             .elevation_3(cx)
             .overflow_hidden()
             .font_family(settings.ui_font.family.clone())
-            .child(div().w_full().child(MarkdownElement::new(
-                self.message.clone(),
-                markdown_style(true, window, cx),
-            )))
-            .children(self.detail.clone().map(|detail| {
-                div().w_full().text_xs().child(MarkdownElement::new(
-                    detail,
-                    markdown_style(false, window, cx),
-                ))
-            }))
             .child(
-                v_flex()
-                    .gap_1()
+                h_flex()
+                    .w_full()
+                    .items_start()
+                    .gap_3()
+                    .child(
+                        div().flex_none().pt_0p5().child(
+                            Icon::new(icon_name)
+                                .size(IconSize::Custom(rems(1.75)))
+                                .color(icon_color),
+                        ),
+                    )
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .w_full()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(MarkdownElement::new(
+                                        self.message.clone(),
+                                        markdown_style(true, window, cx),
+                                    )),
+                            )
+                            .children(self.detail.clone().map(|detail| {
+                                div().w_full().child(MarkdownElement::new(
+                                    detail,
+                                    markdown_style(false, window, cx),
+                                ))
+                            })),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .justify_end()
+                    .flex_wrap()
                     .children(self.actions.iter().enumerate().map(|(ix, action)| {
                         Button::new(ix, action.clone())
-                            .full_width()
                             .style(ButtonStyle::Outlined)
                             .when(ix == self.active_action_id, |s| {
                                 s.style(ButtonStyle::Tinted(TintColor::Accent))

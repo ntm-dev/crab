@@ -3,10 +3,6 @@ use i18n::t;
 
 use crate::{ButtonLike, CircularProgress, CommonAnimationExt, Tooltip, prelude::*};
 
-const LOAD_CIRCLE_GLYPH_VIEWBOX: f32 = 16.0;
-const LOAD_CIRCLE_GLYPH_STROKE_WIDTH: f32 = 1.2;
-const LOAD_CIRCLE_GLYPH_RADIUS: f32 = 5.0;
-
 /// A button component displayed in the title bar to show auto-update status.
 #[derive(IntoElement, RegisterComponent)]
 pub struct UpdateButton {
@@ -153,7 +149,7 @@ impl UpdateButton {
 }
 
 impl RenderOnce for UpdateButton {
-    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let border_color = if self.disabled {
             cx.theme().colors().border
         } else {
@@ -162,15 +158,23 @@ impl RenderOnce for UpdateButton {
 
         let icon_element = if let Some(progress) = self.progress {
             let progress = progress.clamp(0.0, 1.0);
-            let icon_box = IconSize::XSmall.rems().to_pixels(window.rem_size());
-            let progress_color = Color::Default.color(cx);
-            CircularProgress::new(progress, 1.0, icon_box, cx)
-                .stroke_width(
-                    icon_box * (LOAD_CIRCLE_GLYPH_STROKE_WIDTH / LOAD_CIRCLE_GLYPH_VIEWBOX),
+            let icon_box = px(18.);
+            let progress_color = Color::Accent.color(cx);
+            h_flex()
+                .gap_1()
+                .items_center()
+                .child(
+                    CircularProgress::new(progress, 1.0, icon_box, cx)
+                        .stroke_width(px(2.5))
+                        .radius(px(7.))
+                        .bg_color(progress_color.opacity(0.25))
+                        .progress_color(progress_color),
                 )
-                .radius(icon_box * (LOAD_CIRCLE_GLYPH_RADIUS / LOAD_CIRCLE_GLYPH_VIEWBOX))
-                .bg_color(progress_color.opacity(0.2))
-                .progress_color(progress_color)
+                .child(
+                    Label::new(format!("{:.0}%", progress * 100.0))
+                        .size(LabelSize::Small)
+                        .color(Color::Accent),
+                )
                 .into_any_element()
         } else {
             let icon = Icon::new(self.icon)
