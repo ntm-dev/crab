@@ -48,6 +48,12 @@ actions!(
 );
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub(crate) enum VariableListMode {
+    Variables,
+    Watch,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub(crate) struct EntryState {
     depth: usize,
     is_expanded: bool,
@@ -202,6 +208,8 @@ pub struct VariableList {
     disabled: bool,
     memory_view: Entity<MemoryView>,
     weak_running: WeakEntity<RunningState>,
+    mode: VariableListMode,
+    watch_input: Option<Entity<Editor>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -211,10 +219,18 @@ impl VariableList {
         stack_frame_list: Entity<StackFrameList>,
         memory_view: Entity<MemoryView>,
         weak_running: WeakEntity<RunningState>,
+        mode: VariableListMode,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let focus_handle = cx.focus_handle();
+        let watch_input = (mode == VariableListMode::Watch).then(|| {
+            cx.new(|cx| {
+                let mut editor = Editor::single_line(window, cx);
+                editor.set_placeholder_text(&t!("Add expression to watch"), window, cx);
+                editor
+            })
+        });
 
         let _subscriptions = vec![
             cx.subscribe(&stack_frame_list, Self::handle_stack_frame_list_events),
@@ -258,7 +274,32 @@ impl VariableList {
             entry_states: Default::default(),
             weak_running,
             memory_view,
+            mode,
+            watch_input,
         }
+    }
+
+    fn submit_watch_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(input) = self.watch_input.clone() else {
+            return;
+        };
+        let expression = input.read(cx).text(cx).trim().to_string();
+        if expression.is_empty() {
+            return;
+        }
+        let Some(stack_frame_id) = self.selected_stack_frame_id else {
+            return;
+        };
+        input.update(cx, |editor, cx| editor.set_text("", window, cx));
+
+        let add_watcher_task = self.session.update(cx, |session, cx| {
+            session.add_watcher(expression.into(), stack_frame_id, cx)
+        });
+        cx.spawn(async move |this, cx| {
+            add_watcher_task.await?;
+            this.update(cx, |this, cx| this.build_entries(cx))
+        })
+        .detach_and_log_err(cx);
     }
 
     pub(super) fn disabled(&mut self, disabled: bool, cx: &mut Context<Self>) {
@@ -280,9 +321,13 @@ impl VariableList {
 
         let mut entries = vec![];
 
-        let scopes: Vec<_> = self.session.update(cx, |session, cx| {
-            session.scopes(stack_frame_id, cx).to_vec()
-        });
+        let scopes: Vec<_> = if self.mode == VariableListMode::Watch {
+            Vec::new()
+        } else {
+            self.session.update(cx, |session, cx| {
+                session.scopes(stack_frame_id, cx).to_vec()
+            })
+        };
 
         let mut contains_local_scope = false;
 
@@ -314,7 +359,11 @@ impl VariableList {
             })
             .collect::<Vec<_>>();
 
-        let watches = self.session.read(cx).watchers().clone();
+        let watches = if self.mode == VariableListMode::Variables {
+            Default::default()
+        } else {
+            self.session.read(cx).watchers().clone()
+        };
         stack.extend(
             watches
                 .into_values()
@@ -1582,6 +1631,16 @@ impl Render for VariableList {
             .on_action(cx.listener(Self::remove_watcher))
             .on_action(cx.listener(Self::toggle_data_breakpoint))
             .on_action(cx.listener(Self::jump_to_variable_memory))
+            .children(self.watch_input.clone().map(|input| {
+                div()
+                    .w_full()
+                    .px_2()
+                    .py_0p5()
+                    .on_action(cx.listener(|this, _: &menu::Confirm, window, cx| {
+                        this.submit_watch_input(window, cx);
+                    }))
+                    .child(input)
+            }))
             .child(
                 uniform_list(
                     "variable-list",

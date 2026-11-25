@@ -419,6 +419,7 @@ pub struct Pane {
     can_split_predicate:
         Option<Arc<dyn Fn(&mut Self, &dyn Any, &mut Window, &mut Context<Self>) -> bool>>,
     can_toggle_zoom: bool,
+    fixed_main_size: Option<Pixels>,
     should_display_tab_bar: Rc<dyn Fn(&Window, &mut Context<Pane>) -> bool>,
     should_display_welcome_page: bool,
     render_tab_bar_buttons: Rc<
@@ -608,6 +609,7 @@ impl Pane {
             can_drop_predicate,
             can_split_predicate: None,
             can_toggle_zoom: true,
+            fixed_main_size: None,
             should_display_tab_bar: Rc::new(|_, cx| TabBarSettings::get_global(cx).show),
             should_display_welcome_page: false,
             render_tab_bar_buttons: Rc::new(default_render_tab_bar_buttons),
@@ -834,6 +836,17 @@ impl Pane {
 
     pub fn activation_history(&self) -> &[ActivationHistoryEntry] {
         &self.activation_history
+    }
+
+    pub fn fixed_main_size(&self) -> Option<Pixels> {
+        self.fixed_main_size
+    }
+
+    pub fn set_fixed_main_size(&mut self, size: Option<Pixels>, cx: &mut Context<Self>) {
+        if self.fixed_main_size != size {
+            self.fixed_main_size = size;
+            cx.notify();
+        }
     }
 
     pub fn set_should_display_tab_bar<F>(&mut self, should_display_tab_bar: F)

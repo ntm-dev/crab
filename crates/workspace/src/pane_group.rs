@@ -876,6 +876,15 @@ impl PaneAxis {
             })
             .collect::<Vec<_>>();
 
+        let fixed_sizes = self
+            .members
+            .iter()
+            .map(|member| match member {
+                Member::Pane(pane) => pane.read(cx).fixed_main_size(),
+                Member::Axis(_) => None,
+            })
+            .collect::<Vec<_>>();
+
         let element = pane_axis(
             self.axis,
             basis,
@@ -883,6 +892,7 @@ impl PaneAxis {
             self.bounding_boxes.clone(),
             render_cx.workspace().clone(),
         )
+        .with_fixed_sizes(fixed_sizes)
         .with_is_leaf_pane_mask(is_leaf_pane)
         .children(rendered_children)
         .with_active_pane(active_pane_ix)
@@ -1030,6 +1040,7 @@ mod element {
             active_pane_ix: None,
             workspace,
             is_leaf_pane_mask: Vec::new(),
+            fixed_sizes: Vec::new(),
         }
     }
 
@@ -1045,11 +1056,13 @@ mod element {
         workspace: WeakEntity<Workspace>,
         // Track which children are leaf panes (Member::Pane) vs axes (Member::Axis)
         is_leaf_pane_mask: Vec<bool>,
+        fixed_sizes: Vec<Option<Pixels>>,
     }
 
     pub struct PaneAxisLayout {
         dragged_handle: Rc<RefCell<Option<usize>>>,
         children: Vec<PaneAxisChildLayout>,
+        px_per_flex: Pixels,
     }
 
     struct PaneAxisChildLayout {
@@ -1065,6 +1078,11 @@ mod element {
     }
 
     impl PaneAxisElement {
+        pub fn with_fixed_sizes(mut self, fixed_sizes: Vec<Option<Pixels>>) -> Self {
+            self.fixed_sizes = fixed_sizes;
+            self
+        }
+
         pub fn with_active_pane(mut self, active_pane_ix: Option<usize>) -> Self {
             self.active_pane_ix = active_pane_ix;
             self
@@ -1173,6 +1191,49 @@ mod element {
             window.refresh();
         }
 
+        fn compute_resize_with_fixed(
+            flexes: &Arc<Mutex<Vec<f32>>>,
+            e: &MouseMoveEvent,
+            ix: usize,
+            axis: Axis,
+            origins: &[Point<Pixels>],
+            fixed: &[bool],
+            px_per_flex: Pixels,
+            workspace: WeakEntity<Workspace>,
+            window: &mut Window,
+            cx: &mut App,
+        ) {
+            if px_per_flex <= px(0.) {
+                return;
+            }
+            let Some(left) = (0..=ix).rev().find(|i| !fixed[*i]) else {
+                return;
+            };
+            let Some(right) = (ix + 1..fixed.len()).find(|i| !fixed[*i]) else {
+                return;
+            };
+            let min_size = match axis {
+                Axis::Horizontal => px(HORIZONTAL_MIN_SIZE),
+                Axis::Vertical => px(VERTICAL_MIN_SIZE),
+            };
+            let mut flexes = flexes.lock();
+            let total_flex = flexes[left] + flexes[right];
+            let total = px_per_flex * total_flex;
+            if total <= min_size * 2. {
+                return;
+            }
+            let desired = (e.position - origins[left]).along(axis);
+            let new_left = desired.clamp(min_size, total - min_size);
+            flexes[left] = new_left / px_per_flex;
+            flexes[right] = total_flex - flexes[left];
+
+            workspace
+                .update(cx, |this, cx| this.serialize_workspace(window, cx))
+                .log_err();
+            cx.stop_propagation();
+            window.refresh();
+        }
+
         fn layout_handle(
             axis: Axis,
             pane_bounds: Bounds<Pixels>,
@@ -1259,10 +1320,22 @@ mod element {
             debug_assert!(flexes.len() == len);
             debug_assert!(flex_values_in_bounds(flexes.as_slice()));
 
-            let total_flex = len as f32;
+            let fixed_at = |ix: usize| self.fixed_sizes.get(ix).copied().flatten();
+            let any_fixed = (0..len).any(|ix| fixed_at(ix).is_some());
+            let fixed_total = (0..len)
+                .filter_map(fixed_at)
+                .fold(px(0.), |acc, size| acc + size);
+            let flex_total = (0..len)
+                .filter(|ix| fixed_at(*ix).is_none())
+                .map(|ix| flexes[ix])
+                .sum::<f32>();
 
             let mut origin = bounds.origin;
-            let space_per_flex = bounds.size.along(self.axis) / total_flex;
+            let space_per_flex = if any_fixed {
+                (bounds.size.along(self.axis) - fixed_total).max(px(0.)) / flex_total.max(0.001)
+            } else {
+                bounds.size.along(self.axis) / len as f32
+            };
 
             let mut bounding_boxes = self.bounding_boxes.lock();
             bounding_boxes.clear();
@@ -1270,13 +1343,17 @@ mod element {
             let mut layout = PaneAxisLayout {
                 dragged_handle,
                 children: Vec::new(),
+                px_per_flex: space_per_flex,
             };
             for (ix, mut child) in mem::take(&mut self.children).into_iter().enumerate() {
                 let child_flex = flexes[ix];
 
                 let child_size = bounds
                     .size
-                    .apply_along(self.axis, |_| space_per_flex * child_flex)
+                    .apply_along(self.axis, |_| match fixed_at(ix) {
+                        Some(size) => size,
+                        None => space_per_flex * child_flex,
+                    })
                     .map(|d| d.round());
 
                 let child_bounds = Bounds {
@@ -1343,6 +1420,16 @@ mod element {
                 .active_pane_modifiers
                 .border_size
                 .and_then(|val| (val >= 0.).then_some(val));
+
+            let child_origins = layout
+                .children
+                .iter()
+                .map(|child| child.bounds.origin)
+                .collect::<Vec<_>>();
+            let fixed_mask = (0..layout.children.len())
+                .map(|ix| self.fixed_sizes.get(ix).copied().flatten().is_some())
+                .collect::<Vec<_>>();
+            let px_per_flex = layout.px_per_flex;
 
             for (ix, child) in &mut layout.children.iter_mut().enumerate() {
                 if overlay_opacity.is_some() || overlay_border.is_some() {
@@ -1444,9 +1531,27 @@ mod element {
                         let flexes = self.flexes.clone();
                         let child_bounds = child.bounds;
                         let axis = self.axis;
+                        let origins = child_origins.clone();
+                        let fixed = fixed_mask.clone();
+                        let any_fixed = fixed_mask.iter().any(|f| *f);
                         move |e: &MouseMoveEvent, phase, window, cx| {
                             let dragged_handle = dragged_handle.borrow();
                             if phase.bubble() && *dragged_handle == Some(ix) {
+                                if any_fixed {
+                                    Self::compute_resize_with_fixed(
+                                        &flexes,
+                                        e,
+                                        ix,
+                                        axis,
+                                        &origins,
+                                        &fixed,
+                                        px_per_flex,
+                                        workspace.clone(),
+                                        window,
+                                        cx,
+                                    );
+                                    return;
+                                }
                                 Self::compute_resize(
                                     &flexes,
                                     e,

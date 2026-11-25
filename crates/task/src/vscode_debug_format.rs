@@ -66,6 +66,10 @@ impl TryFrom<VsCodeDebugTaskFile> for DebugTaskFile {
                 VariableName::WorktreeRoot.to_string(),
             ),
             (
+                "workspaceRoot".to_owned(),
+                VariableName::WorktreeRoot.to_string(),
+            ),
+            (
                 "relativeFile".to_owned(),
                 VariableName::RelativeFile.to_string(),
             ),

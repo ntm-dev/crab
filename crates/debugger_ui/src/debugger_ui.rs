@@ -17,6 +17,7 @@ use crab_actions::debug_panel::{Toggle, ToggleFocus};
 pub mod attach_modal;
 pub mod debugger_panel;
 mod dropdown_menus;
+mod floating_toolbar;
 mod new_process_modal;
 mod persistence;
 pub(crate) mod session;

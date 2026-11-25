@@ -1,4 +1,6 @@
-use std::path::Path;
+use std::ffi::OsString;
+use std::future::Future;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
 use async_zip::base::read;
@@ -141,6 +143,51 @@ pub async fn extract_seekable_zip<R: AsyncRead + AsyncSeek + Unpin>(
     }
 
     Ok(())
+}
+
+pub async fn extract_into_fresh_dir<F, Fut>(destination: &Path, extract: F) -> Result<()>
+where
+    F: FnOnce(PathBuf) -> Fut,
+    Fut: Future<Output = Result<()>>,
+{
+    if smol::fs::metadata(destination).await.is_ok() {
+        return extract(destination.to_path_buf()).await;
+    }
+
+    let parent = destination
+        .parent()
+        .with_context(|| format!("no parent directory for {destination:?}"))?;
+    let name = destination
+        .file_name()
+        .with_context(|| format!("no file name for {destination:?}"))?;
+    smol::fs::create_dir_all(parent)
+        .await
+        .with_context(|| format!("creating directory {parent:?}"))?;
+
+    let mut staging_name = OsString::from(".");
+    staging_name.push(name);
+    staging_name.push(".partial");
+    let staging = parent.join(staging_name);
+
+    if smol::fs::metadata(&staging).await.is_ok() {
+        smol::fs::remove_dir_all(&staging)
+            .await
+            .with_context(|| format!("removing stale staging directory {staging:?}"))?;
+    }
+    smol::fs::create_dir_all(&staging)
+        .await
+        .with_context(|| format!("creating staging directory {staging:?}"))?;
+
+    let result = match extract(staging.clone()).await {
+        Ok(()) => smol::fs::rename(&staging, destination)
+            .await
+            .with_context(|| format!("moving {staging:?} to {destination:?}")),
+        Err(error) => Err(error),
+    };
+    if result.is_err() {
+        smol::fs::remove_dir_all(&staging).await.ok();
+    }
+    result
 }
 
 #[cfg(test)]
@@ -378,6 +425,37 @@ mod tests {
                 !absolute_target.exists(),
                 "absolute path entry should have been skipped"
             );
+        });
+    }
+
+    #[test]
+    fn test_extract_into_fresh_dir_publishes_only_on_success() {
+        smol::block_on(async {
+            let base_dir = TempDir::new().unwrap();
+            let destination = base_dir.path().join("work/adapter");
+            let staging = base_dir.path().join("work/.adapter.partial");
+
+            let failed = extract_into_fresh_dir(&destination, |target| async move {
+                std::fs::write(target.join("half.txt"), "half").unwrap();
+                anyhow::bail!("interrupted")
+            })
+            .await;
+            assert!(failed.is_err());
+            assert!(!destination.exists(), "failed extraction must not publish");
+            assert!(!staging.exists(), "failed extraction must clean staging");
+
+            std::fs::create_dir_all(&staging).unwrap();
+            std::fs::write(staging.join("stale.txt"), "stale").unwrap();
+
+            extract_into_fresh_dir(&destination, |target| async move {
+                std::fs::write(target.join("full.txt"), "full").unwrap();
+                Ok(())
+            })
+            .await
+            .unwrap();
+            assert_file_content(&destination.join("full.txt"), "full");
+            assert!(!destination.join("stale.txt").exists());
+            assert!(!staging.exists());
         });
     }
 }

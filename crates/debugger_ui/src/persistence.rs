@@ -20,6 +20,7 @@ use crate::session::running::{
 pub(crate) enum DebuggerPaneItem {
     Console,
     Variables,
+    Watch,
     BreakpointList,
     Frames,
     Modules,
@@ -33,6 +34,7 @@ impl DebuggerPaneItem {
         static VARIANTS: &[DebuggerPaneItem] = &[
             DebuggerPaneItem::Console,
             DebuggerPaneItem::Variables,
+            DebuggerPaneItem::Watch,
             DebuggerPaneItem::BreakpointList,
             DebuggerPaneItem::Frames,
             DebuggerPaneItem::Modules,
@@ -60,6 +62,7 @@ impl DebuggerPaneItem {
         match self {
             DebuggerPaneItem::Console => t!("Console"),
             DebuggerPaneItem::Variables => t!("Variables"),
+            DebuggerPaneItem::Watch => t!("Watch"),
             DebuggerPaneItem::BreakpointList => t!("Breakpoints"),
             DebuggerPaneItem::Frames => t!("Frames"),
             DebuggerPaneItem::Modules => t!("Modules"),
@@ -75,6 +78,9 @@ impl DebuggerPaneItem {
             }
             DebuggerPaneItem::Variables => {
                 t!("Shows current values of local and global variables in the current stack frame")
+            }
+            DebuggerPaneItem::Watch => {
+                t!("Evaluates expressions you add and shows their current values")
             }
             DebuggerPaneItem::BreakpointList => t!("Lists all active breakpoints set in the code"),
             DebuggerPaneItem::Frames => {
@@ -120,7 +126,7 @@ pub(crate) struct SerializedPane {
     pub active_item: Option<DebuggerPaneItem>,
 }
 
-const DEBUGGER_PANEL_PREFIX: &str = "debugger_panel_";
+const DEBUGGER_PANEL_PREFIX: &str = "debugger_panel_v4_";
 
 pub(crate) async fn serialize_pane_layout(
     adapter_name: DebugAdapterName,
@@ -206,6 +212,7 @@ pub(crate) fn deserialize_pane_layout(
     project: &Entity<Project>,
     stack_frame_list: &Entity<StackFrameList>,
     variable_list: &Entity<VariableList>,
+    watch_list: &Entity<VariableList>,
     module_list: &Entity<ModuleList>,
     console: &Entity<Console>,
     breakpoint_list: &Entity<BreakpointList>,
@@ -231,6 +238,7 @@ pub(crate) fn deserialize_pane_layout(
                     project,
                     stack_frame_list,
                     variable_list,
+                    watch_list,
                     module_list,
                     console,
                     breakpoint_list,
@@ -282,6 +290,14 @@ pub(crate) fn deserialize_pane_layout(
                         variable_list.focus_handle(cx),
                         variable_list.clone().into(),
                         DebuggerPaneItem::Variables,
+                        running_state.clone(),
+                        pane_handle.clone(),
+                        cx,
+                    )),
+                    DebuggerPaneItem::Watch => Box::new(SubView::new(
+                        watch_list.focus_handle(cx),
+                        watch_list.clone().into(),
+                        DebuggerPaneItem::Watch,
                         running_state.clone(),
                         pane_handle.clone(),
                         cx,

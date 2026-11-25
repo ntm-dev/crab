@@ -50,6 +50,10 @@ use crab_actions::debug_panel::ToggleFocus;
 
 const DEBUG_PANEL_KEY: &str = "DebugPanel";
 
+const DEBUG_BLUE: Color = Color::Custom(gpui::hsla(0.569, 1.0, 0.727, 1.0));
+const DEBUG_GREEN: Color = Color::Custom(gpui::hsla(0.324, 0.453, 0.671, 1.0));
+const DEBUG_RED: Color = Color::Custom(gpui::hsla(0.028, 0.857, 0.70, 1.0));
+
 pub struct DebugPanel {
     active_session: Option<Entity<DebugSession>>,
     project: Entity<Project>,
@@ -167,6 +171,11 @@ impl DebugPanel {
                 });
 
                 workspace.set_debugger_provider(DebuggerProvider(debug_panel.clone()));
+
+                let toolbar = cx.new(|cx| {
+                    crate::floating_toolbar::DebugToolbar::new(debug_panel.downgrade(), cx)
+                });
+                workspace.add_floating_overlay(toolbar, cx);
 
                 debug_panel
             })
@@ -610,6 +619,306 @@ impl DebugPanel {
         }
     }
 
+    pub(crate) fn render_execution_controls(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let active_session = self.active_session.clone();
+        let focus_handle = self.focus_handle.clone();
+        let thread_status = active_session
+            .as_ref()
+            .map(|session| session.read(cx).running_state())
+            .and_then(|state| state.read(cx).thread_status(cx))
+            .unwrap_or(project::debugger::session::ThreadStatus::Exited);
+
+                            h_flex().gap_1().w_full().when_some(
+                                active_session
+                                    .as_ref()
+                                    .map(|session| session.read(cx).running_state()),
+                                |this, running_state| {
+                                    let capabilities = running_state.read(cx).capabilities(cx);
+                                    let supports_detach =
+                                        running_state.read(cx).session().read(cx).is_attached();
+
+                                    this.map(|this| {
+                                        if thread_status == ThreadStatus::Running {
+                                            this.child(
+                                                IconButton::new(
+                                                    "debug-pause",
+                                                    IconName::DebugPause,
+                                                )
+                                                .icon_size(IconSize::Small)
+                                                .icon_color(DEBUG_BLUE)
+                                                .on_click(window.listener_for(
+                                                    running_state,
+                                                    |this, _, _window, cx| {
+                                                        this.pause_thread(cx);
+                                                    },
+                                                ))
+                                                .tooltip({
+                                                    let focus_handle = focus_handle.clone();
+                                                    move |_window, cx| {
+                                                        Tooltip::for_action_in(
+                                                            t!("Pause Program"),
+                                                            &Pause,
+                                                            &focus_handle,
+                                                            cx,
+                                                        )
+                                                    }
+                                                }),
+                                            )
+                                        } else {
+                                            let continue_button = IconButton::new(
+                                                "debug-continue",
+                                                IconName::DebugContinue,
+                                            )
+                                            .icon_size(IconSize::Small)
+                                            .icon_color(DEBUG_BLUE)
+                                            .disabled(thread_status != ThreadStatus::Stopped)
+                                            .on_click(window.listener_for(
+                                                running_state,
+                                                |this, _, _window, cx| {
+                                                    this.continue_program(cx);
+                                                },
+                                            ))
+                                            .tooltip({
+                                                let focus_handle = focus_handle.clone();
+                                                move |_window, cx| {
+                                                    Tooltip::for_action_in(
+                                                        t!("Continue Program"),
+                                                        &Continue,
+                                                        &focus_handle,
+                                                        cx,
+                                                    )
+                                                }
+                                            });
+
+                                            this.child(continue_button).when(
+                                                capabilities
+                                                    .supports_single_thread_execution_requests
+                                                    .unwrap_or_default(),
+                                                |this| {
+                                                    this.child(
+                                                        IconButton::new(
+                                                            "debug-continue-thread",
+                                                            IconName::DebugContinueThread,
+                                                        )
+                                                        .icon_size(IconSize::Small)
+                                                        .icon_color(DEBUG_BLUE)
+                                                        .disabled(
+                                                            thread_status != ThreadStatus::Stopped,
+                                                        )
+                                                        .on_click(window.listener_for(
+                                                            running_state,
+                                                            |this, _, _window, cx| {
+                                                                this.continue_thread(cx);
+                                                            },
+                                                        ))
+                                                        .tooltip({
+                                                            let focus_handle = focus_handle.clone();
+                                                            move |_window, cx| {
+                                                                Tooltip::for_action_in(
+                                                                    t!("Continue Thread"),
+                                                                    &ContinueThread,
+                                                                    &focus_handle,
+                                                                    cx,
+                                                                )
+                                                            }
+                                                        }),
+                                                    )
+                                                },
+                                            )
+                                        }
+                                    })
+                                    .child(
+                                        IconButton::new("step-over", IconName::DebugStepOver)
+                                            .icon_size(IconSize::Small)
+                                            .icon_color(DEBUG_BLUE)
+                                            .on_click(window.listener_for(
+                                                running_state,
+                                                |this, _, _window, cx| {
+                                                    this.step_over(cx);
+                                                },
+                                            ))
+                                            .disabled(thread_status != ThreadStatus::Stopped)
+                                            .tooltip({
+                                                let focus_handle = focus_handle.clone();
+                                                move |_window, cx| {
+                                                    Tooltip::for_action_in(
+                                                        t!("Step Over"),
+                                                        &StepOver,
+                                                        &focus_handle,
+                                                        cx,
+                                                    )
+                                                }
+                                            }),
+                                    )
+                                    .child(
+                                        IconButton::new("step-into", IconName::DebugStepInto)
+                                            .icon_size(IconSize::Small)
+                                            .icon_color(DEBUG_BLUE)
+                                            .on_click(window.listener_for(
+                                                running_state,
+                                                |this, _, _window, cx| {
+                                                    this.step_in(cx);
+                                                },
+                                            ))
+                                            .disabled(thread_status != ThreadStatus::Stopped)
+                                            .tooltip({
+                                                let focus_handle = focus_handle.clone();
+                                                move |_window, cx| {
+                                                    Tooltip::for_action_in(
+                                                        t!("Step In"),
+                                                        &StepInto,
+                                                        &focus_handle,
+                                                        cx,
+                                                    )
+                                                }
+                                            }),
+                                    )
+                                    .child(
+                                        IconButton::new("step-out", IconName::DebugStepOut)
+                                            .icon_size(IconSize::Small)
+                                            .icon_color(DEBUG_BLUE)
+                                            .on_click(window.listener_for(
+                                                running_state,
+                                                |this, _, _window, cx| {
+                                                    this.step_out(cx);
+                                                },
+                                            ))
+                                            .disabled(thread_status != ThreadStatus::Stopped)
+                                            .tooltip({
+                                                let focus_handle = focus_handle.clone();
+                                                move |_window, cx| {
+                                                    Tooltip::for_action_in(
+                                                        t!("Step Out"),
+                                                        &StepOut,
+                                                        &focus_handle,
+                                                        cx,
+                                                    )
+                                                }
+                                            }),
+                                    )
+                                    .child(Divider::vertical())
+                                    .child(
+                                        IconButton::new("debug-restart", IconName::RotateCcw)
+                                            .icon_size(IconSize::Small)
+                                            .icon_color(DEBUG_GREEN)
+                                            .on_click(window.listener_for(
+                                                running_state,
+                                                |this, _, window, cx| {
+                                                    this.rerun_session(window, cx);
+                                                },
+                                            ))
+                                            .tooltip({
+                                                let focus_handle = focus_handle.clone();
+                                                move |_window, cx| {
+                                                    Tooltip::for_action_in(
+                                                        t!("Rerun Session"),
+                                                        &RerunSession,
+                                                        &focus_handle,
+                                                        cx,
+                                                    )
+                                                }
+                                            }),
+                                    )
+                                    .child(
+                                        IconButton::new("debug-stop", IconName::Power)
+                                            .icon_size(IconSize::Small)
+                                            .icon_color(DEBUG_RED)
+                                            .on_click(window.listener_for(
+                                                running_state,
+                                                |this, _, _window, cx| {
+                                                    if this.session().read(cx).is_building() {
+                                                        this.session().update(cx, |session, cx| {
+                                                            session.shutdown(cx).detach()
+                                                        });
+                                                    } else {
+                                                        this.stop_thread(cx);
+                                                    }
+                                                },
+                                            ))
+                                            .disabled(active_session.as_ref().is_none_or(
+                                                |session| {
+                                                    session
+                                                        .read(cx)
+                                                        .session(cx)
+                                                        .read(cx)
+                                                        .is_terminated()
+                                                },
+                                            ))
+                                            .tooltip({
+                                                let focus_handle = focus_handle.clone();
+                                                let label = if capabilities
+                                                    .supports_terminate_threads_request
+                                                    .unwrap_or_default()
+                                                {
+                                                    n!("Terminate Thread")
+                                                } else {
+                                                    n!("Terminate All Threads")
+                                                };
+                                                move |_window, cx| {
+                                                    Tooltip::for_action_in(
+                                                        i18n::translate(label),
+                                                        &Stop,
+                                                        &focus_handle,
+                                                        cx,
+                                                    )
+                                                }
+                                            }),
+                                    )
+                                    .when(supports_detach, |div| {
+                                        div.child(
+                                            IconButton::new(
+                                                "debug-disconnect",
+                                                IconName::DebugDetach,
+                                            )
+                                            .disabled(
+                                                thread_status != ThreadStatus::Stopped
+                                                    && thread_status != ThreadStatus::Running,
+                                            )
+                                            .icon_size(IconSize::Small)
+                                            .icon_color(DEBUG_RED)
+                                            .on_click(window.listener_for(
+                                                running_state,
+                                                |this, _, _, cx| {
+                                                    this.detach_client(cx);
+                                                },
+                                            ))
+                                            .tooltip({
+                                                let focus_handle = focus_handle.clone();
+                                                move |_window, cx| {
+                                                    Tooltip::for_action_in(
+                                                        t!("Detach"),
+                                                        &Detach,
+                                                        &focus_handle,
+                                                        cx,
+                                                    )
+                                                }
+                                            }),
+                                        )
+                                    })
+                                    .child(Divider::vertical())
+                                    .child(
+                                        SplitButton::new(
+                                            self.render_history_button(
+                                                &running_state,
+                                                thread_status,
+                                                window,
+                                            ),
+                                            self.render_history_toggle_button(
+                                                thread_status,
+                                                &running_state,
+                                            )
+                                            .into_any_element(),
+                                        )
+                                        .style(ui::SplitButtonStyle::Outlined),
+                                    )
+                                },
+            )
+    }
+
     pub(crate) fn top_controls_strip(
         &mut self,
         window: &mut Window,
@@ -618,7 +927,7 @@ impl DebugPanel {
         let active_session = self.active_session.clone();
         let focus_handle = self.focus_handle.clone();
         let is_side = self.position(window, cx).axis() == gpui::Axis::Horizontal;
-        let div = if is_side { v_flex() } else { h_flex() };
+        let div = h_flex();
 
         let new_session_button = || {
             IconButton::new("debug-new-session", IconName::Plus)
@@ -675,12 +984,6 @@ impl DebugPanel {
             )
         };
 
-        let thread_status = active_session
-            .as_ref()
-            .map(|session| session.read(cx).running_state())
-            .and_then(|state| state.read(cx).thread_status(cx))
-            .unwrap_or(project::debugger::session::ThreadStatus::Exited);
-
         Some(
             div.w_full()
                 .py_1()
@@ -691,296 +994,18 @@ impl DebugPanel {
                 .when(is_side, |this| this.gap_1())
                 .child(
                     h_flex()
-                        .justify_between()
-                        .child(
-                            h_flex().gap_1().w_full().when_some(
-                                active_session
-                                    .as_ref()
-                                    .map(|session| session.read(cx).running_state()),
-                                |this, running_state| {
-                                    let capabilities = running_state.read(cx).capabilities(cx);
-                                    let supports_detach =
-                                        running_state.read(cx).session().read(cx).is_attached();
-
-                                    this.map(|this| {
-                                        if thread_status == ThreadStatus::Running {
-                                            this.child(
-                                                IconButton::new(
-                                                    "debug-pause",
-                                                    IconName::DebugPause,
-                                                )
-                                                .icon_size(IconSize::Small)
-                                                .on_click(window.listener_for(
-                                                    running_state,
-                                                    |this, _, _window, cx| {
-                                                        this.pause_thread(cx);
-                                                    },
-                                                ))
-                                                .tooltip({
-                                                    let focus_handle = focus_handle.clone();
-                                                    move |_window, cx| {
-                                                        Tooltip::for_action_in(
-                                                            t!("Pause Program"),
-                                                            &Pause,
-                                                            &focus_handle,
-                                                            cx,
-                                                        )
-                                                    }
-                                                }),
-                                            )
-                                        } else {
-                                            let continue_button = IconButton::new(
-                                                "debug-continue",
-                                                IconName::DebugContinue,
-                                            )
-                                            .icon_size(IconSize::Small)
-                                            .disabled(thread_status != ThreadStatus::Stopped)
-                                            .on_click(window.listener_for(
-                                                running_state,
-                                                |this, _, _window, cx| {
-                                                    this.continue_program(cx);
-                                                },
-                                            ))
-                                            .tooltip({
-                                                let focus_handle = focus_handle.clone();
-                                                move |_window, cx| {
-                                                    Tooltip::for_action_in(
-                                                        t!("Continue Program"),
-                                                        &Continue,
-                                                        &focus_handle,
-                                                        cx,
-                                                    )
-                                                }
-                                            });
-
-                                            this.child(continue_button).when(
-                                                capabilities
-                                                    .supports_single_thread_execution_requests
-                                                    .unwrap_or_default(),
-                                                |this| {
-                                                    this.child(
-                                                        IconButton::new(
-                                                            "debug-continue-thread",
-                                                            IconName::DebugContinueThread,
-                                                        )
-                                                        .icon_size(IconSize::Small)
-                                                        .disabled(
-                                                            thread_status != ThreadStatus::Stopped,
-                                                        )
-                                                        .on_click(window.listener_for(
-                                                            running_state,
-                                                            |this, _, _window, cx| {
-                                                                this.continue_thread(cx);
-                                                            },
-                                                        ))
-                                                        .tooltip({
-                                                            let focus_handle = focus_handle.clone();
-                                                            move |_window, cx| {
-                                                                Tooltip::for_action_in(
-                                                                    t!("Continue Thread"),
-                                                                    &ContinueThread,
-                                                                    &focus_handle,
-                                                                    cx,
-                                                                )
-                                                            }
-                                                        }),
-                                                    )
-                                                },
-                                            )
-                                        }
-                                    })
-                                    .child(
-                                        IconButton::new("step-over", IconName::DebugStepOver)
-                                            .icon_size(IconSize::Small)
-                                            .on_click(window.listener_for(
-                                                running_state,
-                                                |this, _, _window, cx| {
-                                                    this.step_over(cx);
-                                                },
-                                            ))
-                                            .disabled(thread_status != ThreadStatus::Stopped)
-                                            .tooltip({
-                                                let focus_handle = focus_handle.clone();
-                                                move |_window, cx| {
-                                                    Tooltip::for_action_in(
-                                                        t!("Step Over"),
-                                                        &StepOver,
-                                                        &focus_handle,
-                                                        cx,
-                                                    )
-                                                }
-                                            }),
-                                    )
-                                    .child(
-                                        IconButton::new("step-into", IconName::DebugStepInto)
-                                            .icon_size(IconSize::Small)
-                                            .on_click(window.listener_for(
-                                                running_state,
-                                                |this, _, _window, cx| {
-                                                    this.step_in(cx);
-                                                },
-                                            ))
-                                            .disabled(thread_status != ThreadStatus::Stopped)
-                                            .tooltip({
-                                                let focus_handle = focus_handle.clone();
-                                                move |_window, cx| {
-                                                    Tooltip::for_action_in(
-                                                        t!("Step In"),
-                                                        &StepInto,
-                                                        &focus_handle,
-                                                        cx,
-                                                    )
-                                                }
-                                            }),
-                                    )
-                                    .child(
-                                        IconButton::new("step-out", IconName::DebugStepOut)
-                                            .icon_size(IconSize::Small)
-                                            .on_click(window.listener_for(
-                                                running_state,
-                                                |this, _, _window, cx| {
-                                                    this.step_out(cx);
-                                                },
-                                            ))
-                                            .disabled(thread_status != ThreadStatus::Stopped)
-                                            .tooltip({
-                                                let focus_handle = focus_handle.clone();
-                                                move |_window, cx| {
-                                                    Tooltip::for_action_in(
-                                                        t!("Step Out"),
-                                                        &StepOut,
-                                                        &focus_handle,
-                                                        cx,
-                                                    )
-                                                }
-                                            }),
-                                    )
-                                    .child(Divider::vertical())
-                                    .child(
-                                        IconButton::new("debug-restart", IconName::RotateCcw)
-                                            .icon_size(IconSize::Small)
-                                            .on_click(window.listener_for(
-                                                running_state,
-                                                |this, _, window, cx| {
-                                                    this.rerun_session(window, cx);
-                                                },
-                                            ))
-                                            .tooltip({
-                                                let focus_handle = focus_handle.clone();
-                                                move |_window, cx| {
-                                                    Tooltip::for_action_in(
-                                                        t!("Rerun Session"),
-                                                        &RerunSession,
-                                                        &focus_handle,
-                                                        cx,
-                                                    )
-                                                }
-                                            }),
-                                    )
-                                    .child(
-                                        IconButton::new("debug-stop", IconName::Power)
-                                            .icon_size(IconSize::Small)
-                                            .on_click(window.listener_for(
-                                                running_state,
-                                                |this, _, _window, cx| {
-                                                    if this.session().read(cx).is_building() {
-                                                        this.session().update(cx, |session, cx| {
-                                                            session.shutdown(cx).detach()
-                                                        });
-                                                    } else {
-                                                        this.stop_thread(cx);
-                                                    }
-                                                },
-                                            ))
-                                            .disabled(active_session.as_ref().is_none_or(
-                                                |session| {
-                                                    session
-                                                        .read(cx)
-                                                        .session(cx)
-                                                        .read(cx)
-                                                        .is_terminated()
-                                                },
-                                            ))
-                                            .tooltip({
-                                                let focus_handle = focus_handle.clone();
-                                                let label = if capabilities
-                                                    .supports_terminate_threads_request
-                                                    .unwrap_or_default()
-                                                {
-                                                    n!("Terminate Thread")
-                                                } else {
-                                                    n!("Terminate All Threads")
-                                                };
-                                                move |_window, cx| {
-                                                    Tooltip::for_action_in(
-                                                        i18n::translate(label),
-                                                        &Stop,
-                                                        &focus_handle,
-                                                        cx,
-                                                    )
-                                                }
-                                            }),
-                                    )
-                                    .when(supports_detach, |div| {
-                                        div.child(
-                                            IconButton::new(
-                                                "debug-disconnect",
-                                                IconName::DebugDetach,
-                                            )
-                                            .disabled(
-                                                thread_status != ThreadStatus::Stopped
-                                                    && thread_status != ThreadStatus::Running,
-                                            )
-                                            .icon_size(IconSize::Small)
-                                            .on_click(window.listener_for(
-                                                running_state,
-                                                |this, _, _, cx| {
-                                                    this.detach_client(cx);
-                                                },
-                                            ))
-                                            .tooltip({
-                                                let focus_handle = focus_handle.clone();
-                                                move |_window, cx| {
-                                                    Tooltip::for_action_in(
-                                                        t!("Detach"),
-                                                        &Detach,
-                                                        &focus_handle,
-                                                        cx,
-                                                    )
-                                                }
-                                            }),
-                                        )
-                                    })
-                                    .child(Divider::vertical())
-                                    .child(
-                                        SplitButton::new(
-                                            self.render_history_button(
-                                                &running_state,
-                                                thread_status,
-                                                window,
-                                            ),
-                                            self.render_history_toggle_button(
-                                                thread_status,
-                                                &running_state,
-                                            )
-                                            .into_any_element(),
-                                        )
-                                        .style(ui::SplitButtonStyle::Outlined),
-                                    )
-                                },
-                            ),
-                        )
-                        .when(is_side, |this| {
-                            this.child(new_session_button())
-                                .child(edit_debug_json_button())
-                                .child(documentation_button())
-                                .child(logs_button())
-                        }),
-                )
-                .child(
-                    h_flex()
                         .gap_0p5()
-                        .when(is_side, |this| this.justify_between())
+                        .min_w_0()
+                        .flex_1()
+                        .overflow_hidden()
+                        .when(is_side, |this| {
+                            this.children(self.render_session_menu(
+                                self.active_session(),
+                                self.running_state(cx),
+                                window,
+                                cx,
+                            ))
+                        })
                         .child(
                             h_flex().when_some(
                                 active_session
@@ -1011,24 +1036,25 @@ impl DebugPanel {
                                     })
                                 },
                             ),
-                        )
-                        .child(
-                            h_flex()
-                                .gap_0p5()
-                                .children(self.render_session_menu(
-                                    self.active_session(),
-                                    self.running_state(cx),
-                                    window,
-                                    cx,
-                                ))
-                                .when(!is_side, |this| {
-                                    this.child(new_session_button())
-                                        .child(edit_debug_json_button())
-                                        .child(documentation_button())
-                                        .child(logs_button())
-                                        .child(close_bottom_panel_button)
-                                }),
                         ),
+                )
+                .child(
+                            h_flex()
+                                .flex_none()
+                                .gap_0p5()
+                                .when(!is_side, |this| {
+                                    this.children(self.render_session_menu(
+                                        self.active_session(),
+                                        self.running_state(cx),
+                                        window,
+                                        cx,
+                                    ))
+                                })
+                                .child(new_session_button())
+                                .child(edit_debug_json_button())
+                                .child(documentation_button())
+                                .child(logs_button())
+                                .when(!is_side, |this| this.child(close_bottom_panel_button)),
                 ),
         )
     }

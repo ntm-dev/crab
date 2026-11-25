@@ -1476,6 +1476,7 @@ pub struct Workspace {
     activity_bar: Entity<ActivityBar>,
     pub(crate) modal_layer: Entity<ModalLayer>,
     toast_layer: Entity<ToastLayer>,
+    floating_overlays: Vec<AnyView>,
     titlebar_item: Option<AnyView>,
     titlebar_focus_handle: FocusHandle,
     region_focus_handles: RegionFocusHandles,
@@ -1909,6 +1910,7 @@ impl Workspace {
             activity_bar,
             modal_layer,
             toast_layer,
+            floating_overlays: Vec::new(),
             titlebar_item: None,
             titlebar_focus_handle: cx.focus_handle(),
             region_focus_handles: RegionFocusHandles::new(cx),
@@ -7301,6 +7303,11 @@ impl Workspace {
         });
     }
 
+    pub fn add_floating_overlay(&mut self, overlay: impl Into<AnyView>, cx: &mut Context<Self>) {
+        self.floating_overlays.push(overlay.into());
+        cx.notify();
+    }
+
     pub fn toggle_status_toast<V: ToastView>(&mut self, entity: Entity<V>, cx: &mut App) {
         self.toast_layer
             .update(cx, |toast_layer, cx| toast_layer.toggle_toast(cx, entity))
@@ -8724,6 +8731,7 @@ impl Render for Workspace {
                     .when(self.status_bar_visible(cx), |parent| {
                         parent.child(self.status_bar.clone())
                     })
+                    .children(self.floating_overlays.iter().cloned())
                     .child(self.toast_layer.clone()),
             )
     }

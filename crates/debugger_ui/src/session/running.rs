@@ -52,7 +52,7 @@ use task::{
 };
 use terminal_view::TerminalView;
 use ui::{
-    FluentBuilder, IntoElement, Render, StatefulInteractiveElement, Tab, Tooltip, VisibleOnHover,
+    FluentBuilder, IntoElement, Render, StatefulInteractiveElement, Tooltip, VisibleOnHover,
     VisualContext, prelude::*,
 };
 use util::ResultExt;
@@ -73,6 +73,7 @@ pub struct RunningState {
     project: WeakEntity<Project>,
     session_id: SessionId,
     variable_list: Entity<variable_list::VariableList>,
+    watch_list: Entity<variable_list::VariableList>,
     _subscriptions: Vec<Subscription>,
     stack_frame_list: Entity<stack_frame_list::StackFrameList>,
     loaded_sources_list: Entity<LoadedSourceList>,
@@ -130,6 +131,9 @@ impl Render for RunningState {
             .unwrap_or(ThreadStatus::Exited);
 
         self.variable_list.update(cx, |this, cx| {
+            this.disabled(thread_status != ThreadStatus::Stopped, cx);
+        });
+        self.watch_list.update(cx, |this, cx| {
             this.disabled(thread_status != ThreadStatus::Stopped, cx);
         });
         v_flex()
@@ -439,8 +443,7 @@ fn render_debugger_tab(
                 .rounded_sm()
                 .map(|s| {
                     if selected {
-                        s.bg(colors.text_accent.opacity(0.08))
-                            .hover(|s| s.bg(colors.text_accent.opacity(0.25)))
+                        s.hover(|s| s.bg(colors.element_hover))
                             .text_color(colors.text_accent)
                     } else {
                         s.hover(|s| s.bg(colors.element_hover))
@@ -506,6 +509,13 @@ fn render_debugger_tab_bar(
         .as_ref()
         .is_some_and(|item| item.read(cx).hovered);
     let deemphasized = !pane.has_focus(window, cx);
+    let collapsed = pane.fixed_main_size().is_some();
+    let single_item = pane.items_len() <= 1;
+    let single_label = if single_item {
+        pane.active_item().map(|item| item.tab_content_text(0, cx))
+    } else {
+        None
+    };
 
     let tabs = pane
         .items()
@@ -527,18 +537,68 @@ fn render_debugger_tab_bar(
                 cx.propagate();
             }
         })
-        .pl_1p5()
+        .pl_1()
         .pr_1()
+        .h(gpui::px(22.))
         .justify_between()
-        .border_b_1()
-        .border_color(cx.theme().colors().border)
-        .bg(cx.theme().colors().tab_bar_background)
         .child(
             h_flex()
                 .w_full()
                 .gap_1()
-                .h(Tab::container_height(cx))
-                .children(tabs)
+                .h_full()
+                .child(
+                    h_flex()
+                        .id(format!("debug-section-toggle-{}", cx.entity_id()))
+                        .cursor_pointer()
+                        .gap_1()
+                        .h_full()
+                        .when(single_item, |this| this.flex_1())
+                        .when_some(
+                            single_item
+                                .then(|| pane.active_item())
+                                .flatten(),
+                            |this, item| {
+                                this.on_drag(
+                                    DraggedTab {
+                                        item: item.boxed_clone(),
+                                        pane: cx.entity(),
+                                        detail: 0,
+                                        is_active: true,
+                                        ix: 0,
+                                    },
+                                    |tab, _, _, cx| {
+                                        let label = tab.item.tab_content_text(0, cx);
+                                        cx.new(|_| DraggedTabPreview { label })
+                                    },
+                                )
+                            },
+                        )
+                        .child(
+                            Icon::new(if collapsed {
+                                IconName::ChevronRight
+                            } else {
+                                IconName::ChevronDown
+                            })
+                            .size(IconSize::Small)
+                            .color(Color::Muted),
+                        )
+                        .when_some(single_label, |this, label| {
+                            this.child(
+                                Label::new(label)
+                                    .size(LabelSize::Small)
+                                    .weight(gpui::FontWeight::SEMIBOLD),
+                            )
+                        })
+                        .on_click(cx.listener(move |pane, _, _, cx| {
+                            let size = if pane.fixed_main_size().is_some() {
+                                None
+                            } else {
+                                Some(gpui::px(22.))
+                            };
+                            pane.set_fixed_main_size(size, cx);
+                        })),
+                )
+                .when(!single_item, |this| this.children(tabs))
                 .on_drop(
                     cx.listener(move |this, dragged_tab: &DraggedTab, window, cx| {
                         if dragged_tab.item.downcast::<SubView>().is_none() {
@@ -843,6 +903,18 @@ impl RunningState {
                 stack_frame_list.clone(),
                 memory_view.clone(),
                 weak_state.clone(),
+                variable_list::VariableListMode::Variables,
+                window,
+                cx,
+            )
+        });
+        let watch_list = cx.new(|cx| {
+            VariableList::new(
+                session.clone(),
+                stack_frame_list.clone(),
+                memory_view.clone(),
+                weak_state.clone(),
+                variable_list::VariableListMode::Watch,
                 window,
                 cx,
             )
@@ -953,6 +1025,7 @@ impl RunningState {
                 &project,
                 &stack_frame_list,
                 &variable_list,
+                &watch_list,
                 &module_list,
                 &console,
                 &breakpoint_list,
@@ -973,6 +1046,7 @@ impl RunningState {
                 &workspace,
                 &stack_frame_list,
                 &variable_list,
+                &watch_list,
                 &console,
                 &breakpoint_list,
                 &debug_terminal,
@@ -993,6 +1067,7 @@ impl RunningState {
             project: weak_project,
             focus_handle,
             variable_list,
+            watch_list,
             _subscriptions,
             thread_id: None,
             stack_frame_list,
@@ -1410,6 +1485,14 @@ impl RunningState {
             DebuggerPaneItem::Variables => Box::new(SubView::new(
                 self.variable_list.focus_handle(cx),
                 self.variable_list.clone().into(),
+                item_kind,
+                running_state,
+                host_pane,
+                cx,
+            )),
+            DebuggerPaneItem::Watch => Box::new(SubView::new(
+                self.watch_list.focus_handle(cx),
+                self.watch_list.clone().into(),
                 item_kind,
                 running_state,
                 host_pane,
@@ -1922,6 +2005,7 @@ impl RunningState {
         workspace: &WeakEntity<Workspace>,
         stack_frame_list: &Entity<StackFrameList>,
         variable_list: &Entity<VariableList>,
+        watch_list: &Entity<VariableList>,
         console: &Entity<Console>,
         breakpoints: &Entity<BreakpointList>,
         debug_terminal: &Entity<DebugTerminal>,
@@ -1942,47 +2026,56 @@ impl RunningState {
             leftmost_pane_handle.clone(),
             cx,
         );
-        let leftmost_breakpoints = SubView::breakpoint_list(
-            breakpoints.clone(),
-            running_state.clone(),
-            leftmost_pane_handle,
-            cx,
-        );
         leftmost_pane.update(cx, |this, cx| {
             this.add_item(Box::new(leftmost_frames), true, false, None, window, cx);
-            this.add_item(
-                Box::new(leftmost_breakpoints),
-                true,
-                false,
-                None,
-                window,
-                cx,
-            );
-            this.activate_item(0, false, false, window, cx);
         });
 
-        let center_pane = new_debugger_pane(workspace.clone(), project.clone(), window, cx);
-        let center_pane_handle = center_pane.downgrade();
-        let center_console = SubView::console(
-            console.clone(),
+        let breakpoints_pane = new_debugger_pane(workspace.clone(), project.clone(), window, cx);
+        let breakpoints_item = SubView::breakpoint_list(
+            breakpoints.clone(),
             running_state.clone(),
-            center_pane_handle.clone(),
+            breakpoints_pane.downgrade(),
             cx,
         );
-        let center_variables = SubView::new(
+        breakpoints_pane.update(cx, |this, cx| {
+            this.add_item(Box::new(breakpoints_item), true, false, None, window, cx);
+        });
+
+        let variables_pane = new_debugger_pane(workspace.clone(), project.clone(), window, cx);
+        let variables_item = SubView::new(
             variable_list.focus_handle(cx),
             variable_list.clone().into(),
             DebuggerPaneItem::Variables,
             running_state.clone(),
-            center_pane_handle,
+            variables_pane.downgrade(),
             cx,
         );
+        variables_pane.update(cx, |this, cx| {
+            this.add_item(Box::new(variables_item), true, false, None, window, cx);
+        });
 
-        center_pane.update(cx, |this, cx| {
-            this.add_item(Box::new(center_console), true, false, None, window, cx);
+        let watch_pane = new_debugger_pane(workspace.clone(), project.clone(), window, cx);
+        let watch_item = SubView::new(
+            watch_list.focus_handle(cx),
+            watch_list.clone().into(),
+            DebuggerPaneItem::Watch,
+            running_state.clone(),
+            watch_pane.downgrade(),
+            cx,
+        );
+        watch_pane.update(cx, |this, cx| {
+            this.add_item(Box::new(watch_item), true, false, None, window, cx);
+        });
 
-            this.add_item(Box::new(center_variables), true, false, None, window, cx);
-            this.activate_item(0, false, false, window, cx);
+        let console_pane = new_debugger_pane(workspace.clone(), project.clone(), window, cx);
+        let console_item = SubView::console(
+            console.clone(),
+            running_state.clone(),
+            console_pane.downgrade(),
+            cx,
+        );
+        console_pane.update(cx, |this, cx| {
+            this.add_item(Box::new(console_item), true, false, None, window, cx);
         });
 
         let rightmost_pane = new_debugger_pane(workspace.clone(), project, window, cx);
@@ -1999,8 +2092,15 @@ impl RunningState {
         });
 
         subscriptions.extend(
-            [&leftmost_pane, &center_pane, &rightmost_pane]
-                .into_iter()
+            [
+                &leftmost_pane,
+                &breakpoints_pane,
+                &variables_pane,
+                &watch_pane,
+                &console_pane,
+                &rightmost_pane,
+            ]
+            .into_iter()
                 .map(|entity| {
                     (
                         entity.entity_id(),
@@ -2011,8 +2111,15 @@ impl RunningState {
 
         let group_root = workspace::PaneAxis::new(
             dock_axis.invert(),
-            [leftmost_pane, center_pane, rightmost_pane]
-                .into_iter()
+            [
+                variables_pane,
+                watch_pane,
+                leftmost_pane,
+                breakpoints_pane,
+                console_pane,
+                rightmost_pane,
+            ]
+            .into_iter()
                 .map(workspace::Member::Pane)
                 .collect(),
         );

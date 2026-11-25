@@ -28,7 +28,7 @@ use std::{
 use task::{SpawnInTerminal, ZedDebugConfig};
 use url::Url;
 use util::{
-    archive::extract_zip, fs::make_file_executable, maybe, paths::PathStyle, rel_path::RelPath,
+    archive::{extract_into_fresh_dir, extract_zip}, fs::make_file_executable, maybe, paths::PathStyle, rel_path::RelPath,
 };
 use wasmtime::component::{Linker, Resource};
 
@@ -1026,19 +1026,23 @@ impl ExtensionImports for WasmState {
                 DownloadedFileType::GzipTar => {
                     let mut tar_gz_bytes = Vec::new();
                     body.read_to_end(&mut tar_gz_bytes).await?;
-                    let decompressed_bytes =
-                        GzipDecoder::new(BufReader::new(tar_gz_bytes.as_slice()));
-                    futures::pin_mut!(decompressed_bytes);
-                    self.host
-                        .fs
-                        .extract_tar_file(&destination_path, Archive::new(decompressed_bytes))
-                        .await?;
+                    let fs = self.host.fs.clone();
+                    extract_into_fresh_dir(&destination_path, |target| async move {
+                        let decompressed_bytes =
+                            GzipDecoder::new(BufReader::new(tar_gz_bytes.as_slice()));
+                        futures::pin_mut!(decompressed_bytes);
+                        fs.extract_tar_file(&target, Archive::new(decompressed_bytes))
+                            .await
+                    })
+                    .await?;
                 }
                 DownloadedFileType::Zip => {
                     futures::pin_mut!(body);
-                    extract_zip(&destination_path, body)
-                        .await
-                        .with_context(|| format!("unzipping {path:?} archive"))?;
+                    extract_into_fresh_dir(&destination_path, |target| async move {
+                        extract_zip(&target, body).await
+                    })
+                    .await
+                    .with_context(|| format!("unzipping {path:?} archive"))?;
                 }
             }
 
