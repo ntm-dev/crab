@@ -38,11 +38,21 @@ use workspace::{
     searchable::SearchableItemHandle,
 };
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SoloDiffMode {
+    Auto,
+    Unstaged,
+    Staged,
+}
+
 pub struct SoloDiffView {
+    deleted: bool,
+    mode: SoloDiffMode,
     repository: Entity<Repository>,
     repository_id: RepositoryId,
     repo_path: RepoPath,
     buffer: Entity<Buffer>,
+    file_buffer: Entity<Buffer>,
     diff: Entity<buffer_diff::BufferDiff>,
     editor: Entity<SplittableEditor>,
     workspace: WeakEntity<Workspace>,
@@ -53,6 +63,7 @@ pub struct SoloDiffView {
 impl SoloDiffView {
     pub fn open_or_focus(
         entry: GitStatusEntry,
+        mode: SoloDiffMode,
         repository: Entity<Repository>,
         workspace: WeakEntity<Workspace>,
         window: &mut Window,
@@ -65,7 +76,7 @@ impl SoloDiffView {
         let existing = workspace_entity
             .read(cx)
             .items_of_type::<SoloDiffView>(cx)
-            .find(|item| item.read(cx).matches(&repository, &entry.repo_path, cx));
+            .find(|item| item.read(cx).matches(&repository, &entry.repo_path, mode, cx));
         if let Some(existing) = existing {
             workspace_entity.update(cx, |workspace, cx| {
                 workspace.activate_item(&existing, true, true, window, cx);
@@ -86,26 +97,69 @@ impl SoloDiffView {
 
         let project = workspace_entity.read(cx).project().clone();
         let repo_path = entry.repo_path;
+        let is_deleted = entry.status.is_deleted();
+        let staged_only = match mode {
+            SoloDiffMode::Staged => true,
+            SoloDiffMode::Unstaged => false,
+            SoloDiffMode::Auto => {
+                entry.status.staging().has_staged()
+                    && !entry.status.staging().has_unstaged()
+                    && !is_deleted
+            }
+        };
+        let unstaged_only = mode == SoloDiffMode::Unstaged && !is_deleted;
         window.spawn(cx, async move |cx| {
-            let buffer = project
+            let file_buffer = project
                 .update(cx, |project, cx| {
                     project.open_buffer(project_path.clone(), cx)
                 })
                 .await?;
-            let diff = project
-                .update(cx, |project, cx| {
-                    project.open_uncommitted_diff(buffer.clone(), cx)
-                })
-                .await?;
+            let (buffer, diff) = if staged_only {
+                let (diff, index_buffer) = project
+                    .update(cx, |project, cx| {
+                        project.open_staged_diff(file_buffer.clone(), cx)
+                    })
+                    .await?;
+                (index_buffer, diff)
+            } else if unstaged_only {
+                let diff = project
+                    .update(cx, |project, cx| {
+                        project.open_unstaged_diff(file_buffer.clone(), cx)
+                    })
+                    .await?;
+                (file_buffer.clone(), diff)
+            } else {
+                let diff = project
+                    .update(cx, |project, cx| {
+                        project.open_uncommitted_diff(file_buffer.clone(), cx)
+                    })
+                    .await?;
+                (file_buffer.clone(), diff)
+            };
+            let buffer = if is_deleted {
+                diff.read_with(cx, |diff, _| diff.base_text_buffer().clone())
+            } else {
+                buffer
+            };
+            let resolved_mode = if staged_only {
+                SoloDiffMode::Staged
+            } else if unstaged_only {
+                SoloDiffMode::Unstaged
+            } else {
+                mode
+            };
 
             workspace_entity.update_in(cx, |workspace, window, cx| {
                 let workspace_handle = cx.entity();
                 let view = cx.new(|cx| {
                     Self::new(
                         project,
+                        resolved_mode,
+                        is_deleted,
                         repository,
                         repo_path,
                         buffer,
+                        file_buffer,
                         diff,
                         workspace_handle,
                         window,
@@ -113,7 +167,12 @@ impl SoloDiffView {
                     )
                 });
 
-                workspace.add_item_to_active_pane(Box::new(view.clone()), None, true, window, cx);
+                let pane = workspace.active_pane().clone();
+                let view_id = view.entity_id();
+                let index = pane.update(cx, |pane, cx| {
+                    pane.replace_preview_item_id(view_id, window, cx)
+                });
+                workspace.add_item_to_active_pane(Box::new(view.clone()), index, true, window, cx);
                 view
             })
         })
@@ -121,9 +180,12 @@ impl SoloDiffView {
 
     fn new(
         project: Entity<Project>,
+        mode: SoloDiffMode,
+        deleted: bool,
         repository: Entity<Repository>,
         repo_path: RepoPath,
         buffer: Entity<Buffer>,
+        file_buffer: Entity<Buffer>,
         diff: Entity<buffer_diff::BufferDiff>,
         workspace: Entity<Workspace>,
         window: &mut Window,
@@ -131,8 +193,13 @@ impl SoloDiffView {
     ) -> Self {
         let repository_id = repository.read(cx).id;
         let showing_full_file = EditorSettings::get_global(cx).file_diff.show_full_file;
-        let multibuffer = cx
-            .new(|cx| Self::build_multibuffer(buffer.clone(), diff.clone(), showing_full_file, cx));
+        let multibuffer = cx.new(|cx| {
+            if deleted {
+                MultiBuffer::singleton(buffer.clone(), cx)
+            } else {
+                Self::build_multibuffer(buffer.clone(), diff.clone(), showing_full_file, cx)
+            }
+        });
         let editor = cx.new(|cx| {
             let editor = SplittableEditor::new(
                 EditorSettings::get_global(cx).diff_view_style,
@@ -144,6 +211,13 @@ impl SoloDiffView {
             );
             editor.rhs_editor().update(cx, |editor, cx| {
                 editor.set_should_serialize(false, cx);
+                if deleted {
+                    editor.set_read_only(true);
+                    return;
+                }
+                if mode == SoloDiffMode::Staged {
+                    editor.set_read_only(true);
+                }
                 editor.set_allow_git_diff_scrollbar_markers(showing_full_file, cx);
                 let snapshot = editor.snapshot(window, cx);
                 editor.go_to_hunk_before_or_after_position(
@@ -174,10 +248,13 @@ impl SoloDiffView {
             });
 
         Self {
+            deleted,
+            mode,
             repository,
             repository_id,
             repo_path,
             buffer,
+            file_buffer,
             diff,
             editor,
             workspace: workspace.downgrade(),
@@ -262,8 +339,16 @@ impl SoloDiffView {
         cx.notify();
     }
 
-    fn matches(&self, repository: &Entity<Repository>, repo_path: &RepoPath, cx: &App) -> bool {
-        self.repository_id == repository.read(cx).id && &self.repo_path == repo_path
+    fn matches(
+        &self,
+        repository: &Entity<Repository>,
+        repo_path: &RepoPath,
+        mode: SoloDiffMode,
+        cx: &App,
+    ) -> bool {
+        self.repository_id == repository.read(cx).id
+            && &self.repo_path == repo_path
+            && (mode == SoloDiffMode::Auto || self.mode == mode)
     }
 
     fn button_states(&self, cx: &App) -> SoloDiffButtonStates {
@@ -363,6 +448,12 @@ impl SoloDiffView {
     }
 }
 
+impl SoloDiffView {
+    pub fn repo_path(&self) -> &RepoPath {
+        &self.repo_path
+    }
+}
+
 impl EventEmitter<EditorEvent> for SoloDiffView {}
 
 impl Focusable for SoloDiffView {
@@ -374,12 +465,46 @@ impl Focusable for SoloDiffView {
 impl Item for SoloDiffView {
     type Event = EditorEvent;
 
-    fn tab_icon(&self, _window: &Window, _cx: &App) -> Option<Icon> {
+    fn tab_icon(&self, _window: &Window, cx: &App) -> Option<Icon> {
+        if self.deleted {
+            let icon = file_icons::FileIcons::get_icon(self.repo_path.as_std_path(), cx)
+                .map(Icon::from_path)
+                .unwrap_or_else(|| Icon::new(IconName::File));
+            return Some(icon.color(Color::Muted));
+        }
         Some(Icon::new(IconName::Diff).color(Color::Muted))
     }
 
+    fn tab_content(
+        &self,
+        params: workspace::item::TabContentParams,
+        _window: &Window,
+        cx: &App,
+    ) -> gpui::AnyElement {
+        let text = self.tab_content_text(params.detail.unwrap_or_default(), cx);
+        let locked = self.deleted || self.mode == SoloDiffMode::Staged;
+        h_flex()
+            .gap_1()
+            .child(
+                Label::new(text).single_line().color(if self.deleted {
+                    Color::Deleted
+                } else {
+                    params.text_color()
+                }),
+            )
+            .when(locked, |this| {
+                this.child(
+                    Icon::new(IconName::Lock)
+                        .size(IconSize::XSmall)
+                        .color(Color::Muted),
+                )
+            })
+            .into_any_element()
+    }
+
     fn tab_content_text(&self, _detail: usize, cx: &App) -> SharedString {
-        self.buffer
+        let name = self
+            .file_buffer
             .read(cx)
             .file()
             .and_then(|file| {
@@ -395,13 +520,33 @@ impl Item for SoloDiffView {
                     .as_ref()
                     .display(PathStyle::local())
                     .into_owned()
-            })
-            .into()
+            });
+        let suffix = self
+            .repository
+            .read(cx)
+            .status_for_path(&self.repo_path)
+            .map(|entry| {
+                if entry.status.is_deleted() {
+                    t!("Deleted")
+                } else if self.mode == SoloDiffMode::Staged {
+                    t!("Index")
+                } else if self.mode == SoloDiffMode::Unstaged
+                    || entry.status.staging().has_unstaged()
+                {
+                    t!("Working Tree")
+                } else {
+                    t!("Index")
+                }
+            });
+        match suffix {
+            Some(suffix) => format!("{name} ({suffix})").into(),
+            None => name.into(),
+        }
     }
 
     fn tab_tooltip_text(&self, cx: &App) -> Option<SharedString> {
         Some(
-            self.buffer
+            self.file_buffer
                 .read(cx)
                 .file()
                 .map(|file| file.full_path(cx).compact().to_string_lossy().into_owned())

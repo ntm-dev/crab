@@ -528,7 +528,7 @@ impl EditorElement {
                         .then(|| multi_buffer_range.clone()),
                 })
         {
-            editor.toggle_single_diff_hunk(hovered_hunk, cx);
+            editor.toggle_git_peek(hovered_hunk.start, window, cx);
             cx.notify();
             return;
         } else if gutter_hitbox.is_hovered(window) {

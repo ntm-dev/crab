@@ -11017,6 +11017,7 @@ dependencies = [
  "regex",
  "serde_json",
  "settings",
+ "smallvec",
  "smol",
  "text",
  "theme",

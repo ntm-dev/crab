@@ -125,5 +125,7 @@
   "{modifier}-click to add a bookmark\nright-click for more options": "{modifier}-nhấp để thêm dấu trang\nnhấp chuột phải để xem thêm tùy chọn",
   "{modifier}-click to add a breakpoint\nright-click for more options": "{modifier}-nhấp để thêm điểm dừng\nnhấp chuột phải để xem thêm tùy chọn",
   "{modifier}-click to disable\nright-click for more options": "{modifier}-nhấp để tắt\nnhấp chuột phải để xem thêm tùy chọn",
+  "Git Local Changes (Working Tree) - {index} of {total} changes": "Thay đổi cục bộ Git (Cây làm việc) - {index} / {total} thay đổi",
+  "{index} of {total} changes": "{index} / {total} thay đổi",
   "{shortcut} to toggle all": "{shortcut} để bật/tắt tất cả"
 }

@@ -3496,7 +3496,7 @@ impl EditorElement {
         let scale = window.scale_factor();
         let pattern_size =
             Self::spacer_pattern_period(f32::from(line_height) * scale, target_size * scale);
-        let color = cx.theme().colors().panel_background;
+        let color = cx.theme().colors().text_muted.opacity(0.25);
         let background = pattern_slash(color, 2.0, pattern_size - 2.0);
 
         div()
@@ -4899,7 +4899,7 @@ impl EditorElement {
 
             if matches!(
                 layout.mode,
-                EditorMode::Full { .. } | EditorMode::Minimap { .. }
+                EditorMode::Full { .. } | EditorMode::Minimap { .. } | EditorMode::AutoHeight { .. }
             ) {
                 let show_active_line_background = match layout.mode {
                     EditorMode::Full {

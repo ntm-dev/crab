@@ -5151,7 +5151,7 @@ fn tab_icon_slot(icon: AnyElement, is_active: bool) -> impl IntoElement {
 
 pub fn git_status_badge(git_status: git::status::GitSummary) -> Option<(&'static str, Color)> {
     if git_status.conflict > 0 {
-        return Some(("!", Color::Conflict));
+        return Some(("!", Color::Error));
     }
     if git_status.untracked > 0 {
         return Some(("U", Color::Created));

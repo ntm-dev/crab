@@ -1072,12 +1072,12 @@
     // Style of the git status indicator in the panel.
     //
     // Choices: label_color, icon
-    // Default: icon
-    "status_style": "icon",
+    // Default: label_color
+    "status_style": "label_color",
     // Whether to show file icons in the git panel.
     //
-    // Default: false
-    "file_icons": false,
+    // Default: true
+    "file_icons": true,
     // What to show for directories in the git panel.
     //
     // 1. A folder icon:
@@ -1087,8 +1087,8 @@
     // 3. A disclosure chevron followed by a folder icon:
     //   "both"
     //
-    // Default: icon
-    "folder_indicator": "icon",
+    // Default: both
+    "folder_indicator": "both",
     // What branch name to use if `init.defaultBranch` is not set
     //
     // Default: main
@@ -1099,16 +1099,16 @@
     "sort_by": "path",
     // How to group entries in the git panel.
     //
-    // Default: status
-    "group_by": "status",
+    // Default: staging
+    "group_by": "staging",
     // Whether to collapse untracked files in the diff panel.
     //
     // Default: false
     "collapse_untracked_diff": false,
     /// Whether to show entries with tree or flat view in the panel
     ///
-    /// Default: false
-    "tree_view": false,
+    /// Default: true
+    "tree_view": true,
     // Whether the git panel should open on startup.
     //
     // Default: false
@@ -1137,7 +1137,7 @@
     //
     // Choices: project_diff, file_diff, view_file
     // Default: project_diff
-    "entry_primary_click_action": "project_diff",
+    "entry_primary_click_action": "file_diff",
   },
   // Whether the screen sharing icon is shown in the os status bar.
   "show_call_status_icon": true,

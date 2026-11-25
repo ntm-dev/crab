@@ -8993,6 +8993,74 @@ impl Repository {
         )
     }
 
+    pub fn create_tag(
+        &mut self,
+        name: String,
+        message: Option<String>,
+    ) -> oneshot::Receiver<Result<()>> {
+        self.send_job(
+            "create_tag",
+            Some(format!("git tag {name}").into()),
+            move |repo, _cx| async move {
+                match repo {
+                    RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
+                        backend.create_tag(name, message).await
+                    }
+                    RepositoryState::Remote(_) => {
+                        anyhow::bail!("tags are not supported over collab")
+                    }
+                }
+            },
+        )
+    }
+
+    pub fn delete_tag(&mut self, name: String) -> oneshot::Receiver<Result<()>> {
+        self.send_job(
+            "delete_tag",
+            Some(format!("git tag -d {name}").into()),
+            move |repo, _cx| async move {
+                match repo {
+                    RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
+                        backend.delete_tag(name).await
+                    }
+                    RepositoryState::Remote(_) => {
+                        anyhow::bail!("tags are not supported over collab")
+                    }
+                }
+            },
+        )
+    }
+
+    pub fn list_tags(&mut self) -> oneshot::Receiver<Result<Vec<String>>> {
+        self.send_job("list_tags", None, move |repo, _cx| async move {
+            match repo {
+                RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
+                    backend.list_tags().await
+                }
+                RepositoryState::Remote(_) => {
+                    anyhow::bail!("tags are not supported over collab")
+                }
+            }
+        })
+    }
+
+    pub fn push_tags(&mut self, remote: String) -> oneshot::Receiver<Result<()>> {
+        self.send_job(
+            "push_tags",
+            Some(format!("git push {remote} --tags").into()),
+            move |repo, _cx| async move {
+                match repo {
+                    RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
+                        backend.push_tags(remote).await
+                    }
+                    RepositoryState::Remote(_) => {
+                        anyhow::bail!("tags are not supported over collab")
+                    }
+                }
+            },
+        )
+    }
+
     pub fn remove_remote(&mut self, remote_name: String) -> oneshot::Receiver<Result<()>> {
         let id = self.id;
         self.send_job(

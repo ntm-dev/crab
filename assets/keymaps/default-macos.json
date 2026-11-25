@@ -250,6 +250,12 @@
     },
   },
   {
+    "context": "SearchPanel > Editor && mode == auto_height",
+    "bindings": {
+      "enter": "menu::Confirm",
+    },
+  },
+  {
     "context": "SearchPanel",
     "use_key_equivalents": true,
     "bindings": {
@@ -263,6 +269,8 @@
       "cmd-enter": "search_panel::OpenInEditor",
       "left": "search_panel::CollapseSelectedEntry",
       "right": "search_panel::ExpandSelectedEntry",
+      "delete": "search_panel::DismissSelectedEntry",
+      "cmd-backspace": "search_panel::DismissSelectedEntry",
       "cmd-left": "search_panel::CollapseAllEntries",
       "cmd-right": "search_panel::ExpandAllEntries",
     },

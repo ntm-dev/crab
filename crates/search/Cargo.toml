@@ -42,6 +42,7 @@ project.workspace = true
 regex.workspace = true
 serde_json.workspace = true
 settings.workspace = true
+smallvec.workspace = true
 smol.workspace = true
 text.workspace = true
 theme.workspace = true

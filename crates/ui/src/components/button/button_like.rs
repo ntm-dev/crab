@@ -66,6 +66,7 @@ pub enum TintColor {
     Error,
     Warning,
     Success,
+    Solid,
 }
 
 impl TintColor {
@@ -89,6 +90,12 @@ impl TintColor {
                 label_color: cx.theme().colors().text,
                 icon_color: cx.theme().colors().text,
             },
+            TintColor::Solid => ButtonLikeStyles {
+                background: cx.theme().status().info,
+                border_color: cx.theme().status().info,
+                label_color: gpui::white(),
+                icon_color: gpui::white(),
+            },
             TintColor::Success => ButtonLikeStyles {
                 background: cx.theme().status().success_background,
                 border_color: cx.theme().status().success_border,
@@ -106,6 +113,7 @@ impl From<TintColor> for Color {
             TintColor::Error => Color::Error,
             TintColor::Warning => Color::Warning,
             TintColor::Success => Color::Success,
+            TintColor::Solid => Color::Accent,
         }
     }
 }

@@ -325,6 +325,16 @@ pub mod git {
             FilterRemotes,
             /// Create a git remote.
             CreateRemote,
+            /// Removes a git remote.
+            RemoveRemote,
+            /// Deletes a local git branch.
+            DeleteBranch,
+            /// Creates a git tag at HEAD.
+            CreateTag,
+            /// Deletes a git tag.
+            DeleteTag,
+            /// Pushes all git tags to a remote.
+            PushTags,
             /// Opens the git branch selector.
             #[action(deprecated_aliases = ["branches::OpenRecent"])]
             Branch,

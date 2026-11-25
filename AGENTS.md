@@ -134,6 +134,7 @@ Other entities can then register a callback to handle these events by doing `cx.
 ## Build guidelines
 
 - Use `./script/clippy` instead of `cargo clippy`
+- A `cargo watch` rebuild runs on every file save, so each Edit costs a full rebuild and restarts the running app. Batch all changes to a file into ONE write (one `Edit`/`Write`, or one `Write` of the whole file) instead of many small edits. When a change spans several files, make all edits back to back in a single turn, then run `cargo check` once.
 
 # Pull request hygiene
 

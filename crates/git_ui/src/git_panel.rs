@@ -8,9 +8,9 @@ use crate::commit_modal::CommitModal;
 use crate::commit_tooltip::{CommitAvatar, CommitTooltip};
 use crate::commit_view::{CommitView, open_file_at_commit};
 use crate::git_panel_settings::GitPanelScrollbarAccessor;
-use crate::project_diff::{DeployBranchDiff, Diff, ProjectDiff};
+use crate::project_diff::{DeployBranchDiff, ProjectDiff};
 use crate::remote_output::{self, RemoteAction, SuccessMessage};
-use crate::solo_diff_view::SoloDiffView;
+use crate::solo_diff_view::{SoloDiffMode, SoloDiffView};
 use crate::staged_diff::StagedDiff;
 use crate::unstaged_diff::UnstagedDiff;
 use crate::{branch_picker, picker_prompt, render_remote_button};
@@ -32,24 +32,25 @@ use git::repository::{
     InitialGraphCommitData, LogOrder, LogSource, PushOptions, Remote, RemoteCommandOutput,
     ResetMode, Upstream, UpstreamTracking, UpstreamTrackingStatus,
 };
+use git::repository::Worktree as GitWorktree;
 use git::stash::GitStash;
 use git::status::{
-    DiffStat, DiffTreeType, StageStatus, StatusCode, TrackedStatus, TreeDiff, TreeDiffStatus,
+    DiffStat, DiffTreeType, StageStatus, StatusCode, TreeDiff, TreeDiffStatus,
 };
 use git::{
     Amend, Commit, Signoff, SkipHooks, ToggleStaged, repository::RepoPath, status::FileStatus,
 };
 use git::{
-    ExpandCommitEditor, GenerateCommitMessage, GitHostingProviderRegistry, GitRemote,
-    RestoreTrackedFiles, StageAll, StashAll, StashApply, StashPop, StashStaged, StashTracked,
-    ToggleFillCommitEditor, TrashUntrackedFiles, UnstageAll, ViewFile, parse_git_remote_url,
+    ExpandCommitEditor, GitHostingProviderRegistry, GitRemote, RestoreTrackedFiles, StageAll,
+    StashAll, StashApply, StashPop, StashStaged, StashTracked, ToggleFillCommitEditor,
+    TrashUntrackedFiles, UnstageAll, ViewFile, parse_git_remote_url,
 };
 use gpui::{
-    AbsoluteLength, Action, Anchor, AnyElement, AsyncWindowContext, ClickEvent, ClipboardItem,
+    AbsoluteLength, Action, Anchor, Bounds, DragMoveEvent, AnyElement, AsyncWindowContext, ClickEvent, ClipboardItem,
     DismissEvent, Empty, Entity, EventEmitter, FocusHandle, Focusable, KeyContext, ListAlignment,
     ListOffset, ListState, MouseButton, MouseDownEvent, Pixels, Point, PromptButton, PromptLevel,
     ScrollStrategy, Subscription, Task, TaskExt, TextStyle, UniformListScrollHandle, WeakEntity,
-    actions, anchored, deferred, list, uniform_list,
+    actions, anchored, canvas, deferred, list, uniform_list,
 };
 use i18n::{n, t};
 use itertools::Itertools;
@@ -68,6 +69,11 @@ use project::{
     project_settings::{GitPathStyle, ProjectSettings},
 };
 
+use crab_actions::{
+    DecreaseBufferFontSize, IncreaseBufferFontSize, ResetBufferFontSize,
+    git_panel::ToggleFocus,
+    workspace::{CopyPath, CopyRelativePath},
+};
 use serde::{Deserialize, Serialize};
 use settings::{
     GitPanelClickBehavior, GitPanelGroupBy, GitPanelSortBy, Settings, SettingsStore, StatusStyle,
@@ -84,9 +90,9 @@ use strum::IntoEnumIterator;
 use theme_settings::ThemeSettings;
 use time::OffsetDateTime;
 use ui::{
-    ButtonLike, Checkbox, Chip, ContextMenu, ContextMenuEntry, Divider, DocumentationSide,
+    ButtonLike, Checkbox, ContextMenu, ContextMenuEntry, DocumentationSide,
     ElevationIndex, IndentGuideColors, KeyBinding, PopoverMenu, PopoverMenuHandle,
-    ProjectEmptyState, ScrollAxes, Scrollbars, SplitButton, Tab, Tooltip, WithScrollbar,
+    ProjectEmptyState, ScrollAxes, Scrollbars, Tab, Tooltip, WithScrollbar,
     prelude::*,
 };
 use util::paths::PathStyle;
@@ -99,17 +105,12 @@ use workspace::{
     dock::{DockPosition, Panel, PanelEvent},
     notifications::{DetachAndPromptErr, NotificationId, NotifyTaskExt},
 };
-use crab_actions::{
-    DecreaseBufferFontSize, IncreaseBufferFontSize, ResetBufferFontSize,
-    git_panel::ToggleFocus,
-    workspace::{CopyPath, CopyRelativePath},
-};
 
 const GIT_PANEL_KEY: &str = "GitPanel";
 const UPDATE_DEBOUNCE: Duration = Duration::from_millis(50);
 // TODO: We should revise this part. It seems the indentation width is not aligned with the one in project panel
 const TREE_INDENT: f32 = 16.0;
-const MAX_HISTORY_TAG_CHIPS: usize = 3;
+const HISTORY_CHILD_INDENT: f32 = 10.0;
 // Horizontal offset that aligns the tree indent guides with the row icon column.
 const INDENT_GUIDE_LEFT_OFFSET: gpui::Pixels = gpui::px(19.);
 
@@ -320,6 +321,41 @@ fn git_panel_context_menu(
     ContextMenu::build(window, cx, |context_menu, _, _| {
         context_menu
             .context(focus_handle.clone())
+            .action(t!("Pull"), git::Pull.boxed_clone())
+            .action(t!("Pull (Rebase)"), git::PullRebase.boxed_clone())
+            .action(t!("Push"), git::Push.boxed_clone())
+            .action(t!("Force Push"), git::ForcePush.boxed_clone())
+            .action(t!("Fetch"), git::Fetch.boxed_clone())
+            .separator()
+            .action(
+                t!("Checkout to…"),
+                crab_actions::git::Switch.boxed_clone(),
+            )
+            .action(t!("Branches"), crab_actions::git::Branch.boxed_clone())
+            .action(t!("Worktrees"), crab_actions::git::Worktree.boxed_clone())
+            .separator()
+            .action(
+                t!("Rename Branch…"),
+                git::RenameBranch::default().boxed_clone(),
+            )
+            .action(
+                t!("Delete Branch…"),
+                crab_actions::git::DeleteBranch.boxed_clone(),
+            )
+            .separator()
+            .action(
+                t!("Add Remote…"),
+                crab_actions::git::CreateRemote.boxed_clone(),
+            )
+            .action(
+                t!("Remove Remote…"),
+                crab_actions::git::RemoveRemote.boxed_clone(),
+            )
+            .separator()
+            .action(t!("Create Tag…"), crab_actions::git::CreateTag.boxed_clone())
+            .action(t!("Delete Tag…"), crab_actions::git::DeleteTag.boxed_clone())
+            .action(t!("Push Tags…"), crab_actions::git::PushTags.boxed_clone())
+            .separator()
             .action_disabled_when(
                 !has_unstaged_changes,
                 t!("Stage All"),
@@ -589,13 +625,85 @@ enum CommitHistory {
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum HistoryRow {
     Commit(usize),
-    File { commit: usize, file: usize },
+    File {
+        commit: usize,
+        file: usize,
+        depth: usize,
+    },
     FilesStatus(usize),
+    Dir {
+        commit: usize,
+        file: usize,
+        depth: usize,
+        start: usize,
+        span: usize,
+    },
+}
+
+#[derive(Default)]
+struct HistoryTreeNode {
+    dirs: BTreeMap<String, HistoryTreeNode>,
+    files: Vec<usize>,
+    first_file: usize,
+}
+
+fn push_history_tree_rows(
+    node: &HistoryTreeNode,
+    commit: usize,
+    depth: usize,
+    start: usize,
+    parent_path: &str,
+    collapsed: &dyn Fn(&str) -> bool,
+    rows: &mut Vec<HistoryRow>,
+) {
+    let join = |parent: &str, name: &str| {
+        if parent.is_empty() {
+            name.to_string()
+        } else {
+            format!("{parent}/{name}")
+        }
+    };
+    for (name, child) in &node.dirs {
+        let mut span = 1;
+        let mut current = child;
+        let mut path = join(parent_path, name);
+        if depth >= 1 {
+            while current.files.is_empty() && current.dirs.len() == 1 {
+                if let Some((next_name, next)) = current.dirs.iter().next() {
+                    path = join(&path, next_name);
+                    current = next;
+                    span += 1;
+                }
+            }
+        }
+        rows.push(HistoryRow::Dir {
+            commit,
+            file: child.first_file,
+            depth,
+            start,
+            span,
+        });
+        if !collapsed(&path) {
+            push_history_tree_rows(
+                current,
+                commit,
+                depth + 1,
+                start + span,
+                &path,
+                collapsed,
+                rows,
+            );
+        }
+    }
+    for &file in &node.files {
+        rows.push(HistoryRow::File { commit, file, depth });
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum HistoryRowKey {
     Commit(Oid),
+    Dir(Oid, usize, usize),
     File(Oid, usize),
     FilesStatus(Oid),
 }
@@ -605,8 +713,8 @@ struct HistoryAnchor {
     scroll_top: Option<(HistoryRowKey, Pixels)>,
 }
 
-const HISTORY_COMMIT_ROW_HEIGHT: Pixels = px(48.);
-const HISTORY_FILE_ROW_HEIGHT: Pixels = px(24.);
+const HISTORY_COMMIT_ROW_HEIGHT: Pixels = px(28.);
+const HISTORY_FILE_ROW_HEIGHT: Pixels = px(28.);
 const HISTORY_LOADING_DELAY: Duration = Duration::from_millis(150);
 
 struct HistoryFile {
@@ -622,6 +730,65 @@ enum HistoryCommitFiles {
     },
     Loaded(Rc<[HistoryFile]>),
     Failed,
+}
+
+const DEFAULT_SECTION_WEIGHTS: [f32; 4] = [4., 3., 1., 1.];
+const SECTION_MIN_HEIGHT: f32 = 48.;
+const SECTION_CHANGES: usize = 0;
+const SECTION_COMMITS: usize = 1;
+const SECTION_STASHES: usize = 2;
+const SECTION_WORKTREES: usize = 3;
+
+#[derive(Clone, Copy)]
+struct SashDrag {
+    upper: usize,
+    lower: usize,
+    start_y: Pixels,
+    upper_height: Pixels,
+    lower_height: Pixels,
+}
+
+#[derive(Clone, Copy)]
+struct DraggedSash;
+
+impl Render for DraggedSash {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        Empty
+    }
+}
+
+fn split_commit_button(left: ButtonLike, right: AnyElement) -> impl IntoElement {
+    h_flex()
+        .w_full()
+        .h(rems_from_px(28_f32))
+        .rounded_sm()
+        .overflow_hidden()
+        .child(div().flex_1().child(left))
+        .child(div().w(px(1.)).h_full().bg(gpui::white().opacity(0.5)))
+        .child(right)
+}
+
+fn history_indent_guides(depth: usize, cx: &App) -> Vec<Div> {
+    let color = IndentGuideColors::panel(cx).default;
+    (0..depth)
+        .map(|level| {
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .w(px(1.))
+                .left(INDENT_GUIDE_LEFT_OFFSET + px(level as f32 * TREE_INDENT))
+                .bg(color)
+        })
+        .collect()
+}
+
+fn history_status_style(status: StatusCode) -> (&'static str, Color) {
+    match status {
+        StatusCode::Added => ("A", Color::VersionControlAdded),
+        StatusCode::Deleted => ("D", Color::VersionControlDeleted),
+        _ => ("M", Color::VersionControlModified),
+    }
 }
 
 fn history_files_from_tree_diff(tree_diff: TreeDiff) -> Vec<HistoryFile> {
@@ -693,6 +860,13 @@ enum Section {
     Unstaged,
 }
 
+#[derive(Clone, Copy)]
+enum StashOp {
+    Apply,
+    Pop,
+    Drop,
+}
+
 #[derive(Debug, PartialEq, Eq, Clone)]
 struct GitHeaderEntry {
     header: Section,
@@ -738,14 +912,6 @@ impl StageIntent {
         }
     }
 
-    fn checkbox_state(self, entry_state: impl FnOnce() -> ToggleState) -> ToggleState {
-        match self {
-            StageIntent::Stage => ToggleState::Unselected,
-            StageIntent::Unstage => ToggleState::Selected,
-            StageIntent::Toggle => entry_state(),
-        }
-    }
-
     fn label(self, stage_status: impl FnOnce() -> StageStatus) -> SharedString {
         if self.resolve_with(stage_status) {
             t!("Stage")
@@ -788,11 +954,11 @@ impl GitHeaderEntry {
     }
     pub fn title(&self) -> SharedString {
         match self.header {
-            Section::Conflict => t!("Conflicts"),
-            Section::Tracked => t!("Tracked"),
-            Section::New => t!("Untracked"),
-            Section::Staged => t!("Staged"),
-            Section::Unstaged => t!("Unstaged"),
+            Section::Conflict => t!("Merge Changes"),
+            Section::Tracked => t!("Changes"),
+            Section::New => t!("Untracked Changes"),
+            Section::Staged => t!("Staged Changes"),
+            Section::Unstaged => t!("Changes"),
         }
     }
 }
@@ -1297,6 +1463,17 @@ pub struct GitPanel {
     add_coauthors: bool,
     entries: Vec<GitListEntry>,
     collapsed_sections: HashSet<Section>,
+    stashes_collapsed: bool,
+    worktrees_collapsed: bool,
+    worktrees: Vec<GitWorktree>,
+    worktrees_task: Task<()>,
+    section_weights: [f32; 4],
+    section_bounds: Rc<Cell<[Bounds<Pixels>; 4]>>,
+    sash_drag: Option<SashDrag>,
+    expanded_stashes: HashMap<Oid, Option<Arc<[HistoryFile]>>>,
+    collapsed_history_dirs: HashSet<(Oid, String)>,
+    commits_collapsed: bool,
+    changes_collapsed: bool,
     view_mode: GitPanelViewMode,
     tree_expanded_dirs: HashMap<TreeKey, bool>,
     projected_entries_by_path: HashMap<RepoPath, SmallVec<[ProjectedChangeEntry; 2]>>,
@@ -1378,7 +1555,7 @@ impl From<&Arc<InitialGraphCommitData>> for CommitHistoryEntry {
     }
 }
 
-const MAX_PANEL_EDITOR_LINES: usize = 6;
+const MAX_PANEL_EDITOR_LINES: usize = 10;
 
 pub(crate) fn commit_message_editor(
     commit_message_buffer: Entity<Buffer>,
@@ -1392,7 +1569,7 @@ pub(crate) fn commit_message_editor(
     let max_lines = if in_panel { MAX_PANEL_EDITOR_LINES } else { 18 };
     let mut commit_editor = Editor::new(
         EditorMode::AutoHeight {
-            min_lines: max_lines,
+            min_lines: if in_panel { 1 } else { max_lines },
             max_lines: Some(max_lines),
         },
         buffer,
@@ -1516,6 +1693,10 @@ impl GitPanel {
                     this.bulk_staging.take();
                     update_entries = true;
                 }
+                if tree_view != was_tree_view {
+                    let anchor = this.history_anchor();
+                    this.rebuild_history_rows(anchor, cx);
+                }
                 if (diff_stats != was_diff_stats) || update_entries {
                     this.update_visible_entries(window, cx);
                 }
@@ -1587,6 +1768,17 @@ impl GitPanel {
                 add_coauthors: true,
                 entries: Vec::new(),
                 collapsed_sections: HashSet::default(),
+                stashes_collapsed: false,
+                worktrees_collapsed: false,
+                worktrees: Vec::new(),
+                worktrees_task: Task::ready(()),
+                section_weights: DEFAULT_SECTION_WEIGHTS,
+                section_bounds: Rc::new(Cell::new([Bounds::default(); 4])),
+                sash_drag: None,
+                expanded_stashes: HashMap::default(),
+            collapsed_history_dirs: HashSet::default(),
+                commits_collapsed: false,
+                changes_collapsed: false,
                 view_mode: GitPanelViewMode::from_settings(cx),
                 tree_expanded_dirs: HashMap::default(),
                 projected_entries_by_path: HashMap::default(),
@@ -2607,11 +2799,55 @@ impl GitPanel {
                 .clone();
             let repository = self.active_repository.clone()?;
 
-            SoloDiffView::open_or_focus(entry, repository, self.workspace.clone(), window, cx)
-                .detach_and_notify_err(self.workspace.clone(), window, cx);
+            if entry.status.is_conflicted() || entry.status.is_untracked() {
+                self.view_file(&ViewFile, window, cx);
+                return Some(());
+            }
+
+            let mode = match self.section_for_entry_index(self.selected_entry?) {
+                Some(Section::Staged) => SoloDiffMode::Staged,
+                Some(Section::Unstaged) => SoloDiffMode::Unstaged,
+                _ => SoloDiffMode::Auto,
+            };
+
+            SoloDiffView::open_or_focus(
+                entry,
+                mode,
+                repository,
+                self.workspace.clone(),
+                window,
+                cx,
+            )
+            .detach_and_notify_err(self.workspace.clone(), window, cx);
 
             Some(())
         });
+    }
+
+    fn open_files_for_entries(
+        &mut self,
+        entries: &[GitStatusEntry],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(repository) = self.active_repository.clone() else {
+            return;
+        };
+        for entry in entries {
+            let Some(project_path) = repository
+                .read(cx)
+                .repo_path_to_project_path(&entry.repo_path, cx)
+            else {
+                continue;
+            };
+            self.workspace
+                .update(cx, |workspace, cx| {
+                    workspace
+                        .open_path_preview(project_path, None, false, false, true, window, cx)
+                        .detach_and_log_err(cx);
+                })
+                .ok();
+        }
     }
 
     fn view_file(&mut self, _: &ViewFile, window: &mut Window, cx: &mut Context<Self>) {
@@ -3261,6 +3497,17 @@ impl GitPanel {
             .unwrap_or(entry.staging)
     }
 
+    fn directory_status_entries(&self, key: &TreeKey) -> Vec<GitStatusEntry> {
+        let GitPanelViewMode::Tree(tree_state) = &self.view_mode else {
+            return Vec::new();
+        };
+        tree_state
+            .directory_descendants
+            .get(key)
+            .map(|descendants| descendants.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
     fn stage_status_for_directory(
         &self,
         entry: &GitTreeDirEntry,
@@ -3563,15 +3810,6 @@ impl GitPanel {
         .detach();
     }
 
-    fn generate_commit_message_action(
-        &mut self,
-        _: &GenerateCommitMessage,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.generate_commit_message(cx);
-    }
-
     pub fn generate_commit_message(&mut self, cx: &mut Context<Self>) {
         if self.generate_commit_message_task.is_some()
             || !agent_chat::AgentChatSettings::get_global(cx).enabled
@@ -3650,83 +3888,6 @@ impl GitPanel {
                 cx,
             )
         });
-    }
-
-    fn render_generate_commit_message_button(&self, cx: &Context<Self>) -> Option<AnyElement> {
-        if !agent_chat::AgentChatSettings::get_global(cx).enabled {
-            return None;
-        }
-        if self.generate_commit_message_task.is_some() {
-            return Some(
-                h_flex()
-                    .gap_1()
-                    .child(
-                        IconButton::new("stop-generate-commit-message", IconName::Stop)
-                            .icon_color(Color::Error)
-                            .icon_size(IconSize::Small)
-                            .tooltip(Tooltip::text(t!("Stop Writing Commit Message")))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.set_generate_commit_message_task(None, cx);
-                            })),
-                    )
-                    .child(
-                        Label::new(t!("Generating…"))
-                            .size(LabelSize::Small)
-                            .color(Color::Muted),
-                    )
-                    .into_any_element(),
-            );
-        }
-        let has_changes = self.has_staged_changes() || self.has_tracked_changes();
-        let agent = agent_chat::commit_message_agent_label(cx);
-        let editor_focus_handle = self.commit_editor.focus_handle(cx);
-        let languages = self.project.read(cx).languages().clone();
-        let generate = IconButton::new("generate-commit-message", IconName::Sparkle)
-            .icon_size(IconSize::Small)
-            .icon_color(Color::Muted)
-            .disabled(!has_changes)
-            .tooltip(move |_window, cx| {
-                if !has_changes {
-                    return Tooltip::simple(t!("No Changes to Commit"), cx);
-                }
-                match &agent {
-                    Some(agent) => Tooltip::with_meta_in(
-                        t!("Write Commit Message"),
-                        Some(&GenerateCommitMessage),
-                        agent.clone(),
-                        &editor_focus_handle,
-                        cx,
-                    ),
-                    None => Tooltip::for_action_in(
-                        t!("Write Commit Message"),
-                        &GenerateCommitMessage,
-                        &editor_focus_handle,
-                        cx,
-                    ),
-                }
-            })
-            .on_click(cx.listener(|this, _, _, cx| this.generate_commit_message(cx)));
-        let pick_agent = PopoverMenu::new("commit-message-agent-menu")
-            .trigger_with_tooltip(
-                IconButton::new("commit-message-agent", IconName::ChevronDown)
-                    .icon_size(IconSize::XSmall)
-                    .icon_color(Color::Muted),
-                Tooltip::text(t!("Choose Agent and Model")),
-            )
-            .menu(move |window, cx| {
-                Some(agent_chat::commit_message_menu(
-                    languages.clone(),
-                    window,
-                    cx,
-                ))
-            })
-            .anchor(Anchor::BottomLeft);
-        Some(
-            h_flex()
-                .child(generate)
-                .child(pick_agent)
-                .into_any_element(),
-        )
     }
 
     pub fn commit_message_buffer(&self, cx: &App) -> Entity<Buffer> {
@@ -4183,6 +4344,25 @@ impl GitPanel {
     }
 
     /// Suggests a commit message based on the changed files and their statuses
+    fn commit_placeholder(&self, cx: &App) -> SharedString {
+        if let Some(message) = self.suggest_commit_message(cx) {
+            return message.into();
+        }
+        let shortcut = if cfg!(target_os = "macos") {
+            "⌘Enter"
+        } else {
+            "Ctrl+Enter"
+        };
+        let branch_name = self
+            .active_repository
+            .as_ref()
+            .and_then(|repo| repo.read(cx).branch.as_ref().map(|b| b.name().to_string()));
+        match branch_name {
+            Some(name) => format!("Message ({shortcut} to commit on \"{name}\")").into(),
+            None => format!("Message ({shortcut} to commit)").into(),
+        }
+    }
+
     pub fn suggest_commit_message(&self, cx: &App) -> Option<String> {
         if let Some(merge_message) = self
             .active_repository
@@ -5083,16 +5263,13 @@ impl GitPanel {
             if self.generate_commit_message_task.is_some() {
                 self.set_generate_commit_message_task(None, cx);
             }
-            if self.active_tab == GitPanelTab::History {
-                self.set_commit_history(CommitHistory::Loading, cx);
-            }
+            self.set_commit_history(CommitHistory::Loading, cx);
         }
         self.active_repository = new_active_repository;
         self.reopen_commit_buffer(window, cx);
         self.preload_commit_history(cx);
-        if self.active_tab == GitPanelTab::History {
-            self.load_commit_history(cx);
-        }
+        self.load_commit_history(cx);
+        self.refresh_worktrees(cx);
         self.update_visible_entries_task = cx.spawn_in(window, async move |_, cx| {
             cx.background_executor().timer(UPDATE_DEBOUNCE).await;
             if let Some(git_panel) = handle.upgrade() {
@@ -5145,7 +5322,7 @@ impl GitPanel {
                         git_panel.commit_editor = cx.new(|cx| {
                             commit_message_editor(
                                 buffer.clone(),
-                                git_panel.suggest_commit_message(cx).map(SharedString::from),
+                                Some(git_panel.commit_placeholder(cx)),
                                 git_panel.project.clone(),
                                 true,
                                 window,
@@ -5462,7 +5639,7 @@ impl GitPanel {
         let show_when_empty = |section: Section| {
             group_by_staging_state
                 && has_any_section_entries
-                && matches!(section, Section::Staged | Section::Unstaged)
+                && matches!(section, Section::Unstaged)
         };
 
         match &mut self.view_mode {
@@ -5604,9 +5781,7 @@ impl GitPanel {
         self.select_first_entry_if_none(window, cx);
         self.select_last_entry_if_out_of_bounds(window, cx);
 
-        let suggested_commit_message = self.suggest_commit_message(cx);
-        let placeholder_text =
-            suggested_commit_message.unwrap_or_else(|| t!("Enter commit message").to_string());
+        let placeholder_text = self.commit_placeholder(cx);
 
         self.commit_editor.update(cx, |editor, cx| {
             editor.set_placeholder_text(&placeholder_text, window, cx)
@@ -5768,10 +5943,6 @@ impl GitPanel {
             .any(|entry| entry.staging.has_unstaged())
     }
 
-    fn primary_changes_action_stages(&self) -> bool {
-        self.entry_count == 0 || self.has_unstaged_changes()
-    }
-
     fn has_tracked_changes(&self) -> bool {
         self.tracked_count > 0
     }
@@ -5915,8 +6086,10 @@ impl GitPanel {
                         // generic `CreatePullRequest` action when the toast
                         // button is pressed.
                         this.action(t!("Create Pull Request"), move |window, cx| {
-                            window
-                                .dispatch_action(Box::new(crab_actions::git::CreatePullRequest), cx);
+                            window.dispatch_action(
+                                Box::new(crab_actions::git::CreatePullRequest),
+                                cx,
+                            );
                         })
                     }
                     (Toast, false) => this,
@@ -6019,7 +6192,7 @@ impl GitPanel {
         PopoverMenu::new(id.into())
             .trigger_with_tooltip(
                 IconButton::new("view-options-menu-trigger", IconName::Filter)
-                    .icon_size(IconSize::Small),
+                    .icon_size(IconSize::Medium),
                 Tooltip::text(t!("View Options")),
             )
             .menu(move |window, cx| {
@@ -6084,7 +6257,7 @@ impl GitPanel {
         let menu_open = self.commit_menu_handle.is_deployed();
 
         PopoverMenu::new(id.into())
-            .trigger(crate::render_split_button_chevron_trigger(
+            .trigger(crate::render_solid_split_button_chevron_trigger(
                 "commit-split-button-right",
                 menu_open,
             ))
@@ -6138,6 +6311,12 @@ impl GitPanel {
                                         Label::new("git commit --no-verify").into_any_element()
                                     }),
                             )
+                            .when(has_previous_commit, |this| {
+                                this.separator().action(
+                                    t!("Undo Last Commit"),
+                                    git::Uncommit.boxed_clone(),
+                                )
+                            })
                     }))
                 }
             })
@@ -6168,17 +6347,9 @@ impl GitPanel {
 
     pub fn commit_button_title(&self) -> SharedString {
         if self.amend_pending {
-            if self.has_staged_changes() {
-                t!("Amend")
-            } else if self.has_tracked_changes() {
-                t!("Amend Tracked")
-            } else {
-                t!("Amend")
-            }
-        } else if self.has_staged_changes() {
-            t!("Commit")
+            t!("Amend")
         } else {
-            t!("Commit Tracked")
+            t!("Commit")
         }
     }
 
@@ -6198,7 +6369,7 @@ impl GitPanel {
                 })
             } else {
                 editor.set_mode(EditorMode::AutoHeight {
-                    min_lines: MAX_PANEL_EDITOR_LINES,
+                    min_lines: 1,
                     max_lines: Some(MAX_PANEL_EDITOR_LINES),
                 })
             }
@@ -6240,10 +6411,11 @@ impl GitPanel {
         let menu_open = self.changes_actions_menu_handle.is_deployed();
 
         PopoverMenu::new(id.into())
-            .trigger(crate::render_split_button_chevron_trigger(
-                "changes-actions-split-button-right",
-                menu_open,
-            ))
+            .trigger(
+                IconButton::new("changes-actions-more", IconName::Ellipsis)
+                    .icon_size(IconSize::Medium)
+                    .toggle_state(menu_open),
+            )
             .with_handle(self.changes_actions_menu_handle.clone())
             .menu(move |window, cx| {
                 Some(git_panel_context_menu(
@@ -6267,49 +6439,6 @@ impl GitPanel {
             })
     }
 
-    fn render_git_changes_actions_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let (text, action, stage, tooltip) = if self.primary_changes_action_stages() {
-            (
-                t!("Stage All"),
-                StageAll.boxed_clone(),
-                true,
-                "git add --all",
-            )
-        } else {
-            (
-                t!("Unstage All"),
-                UnstageAll.boxed_clone(),
-                false,
-                "git reset",
-            )
-        };
-
-        SplitButton::new(
-            ButtonLike::new_rounded_left("git-changes-actions-split-button-left")
-                .layer(ElevationIndex::ModalSurface)
-                .size(ButtonSize::Compact)
-                .child(Label::new(text).size(LabelSize::Small).mr_0p5())
-                .tooltip(Tooltip::for_action_title_in(
-                    tooltip,
-                    action.as_ref(),
-                    &self.focus_handle,
-                ))
-                .disabled(self.entry_count == 0)
-                .on_click({
-                    let git_panel = cx.weak_entity();
-                    move |_, _, cx| {
-                        git_panel
-                            .update(cx, |git_panel, cx| {
-                                git_panel.change_all_files_stage(stage, cx);
-                            })
-                            .ok();
-                    }
-                }),
-            self.render_git_changes_actions_menu("git-changes-actions-split-button-menu", cx)
-                .into_any_element(),
-        )
-    }
-
     fn render_changes_header(
         &self,
         _window: &mut Window,
@@ -6321,9 +6450,23 @@ impl GitPanel {
 
         self.active_repository.as_ref()?;
 
-        let diff_stat_total = self.diff_stat_total;
-
         Some(
+            v_flex()
+                .w_full()
+                .flex_none()
+                .child(
+                    h_flex()
+                        .h(self.list_item_height())
+                        .w_full()
+                        .pl_2p5()
+                        .pr_2()
+                        .child(
+                            Label::new(t!("Source Control"))
+                                .weight(gpui::FontWeight::BOLD)
+                                .size(LabelSize::Small),
+                        ),
+                )
+                .child(
             h_flex()
                 .min_h(Tab::container_height(cx))
                 .w_full()
@@ -6334,48 +6477,62 @@ impl GitPanel {
                 .gap_1()
                 .justify_between()
                 .child(
-                    ButtonLike::new("diff-button")
+                    h_flex()
+                        .id("changes-section-toggle")
+                        .gap_1()
+                        .pl_1()
+                        .h(self.list_item_height())
+                        .flex_1()
+                        .cursor_pointer()
                         .child(
-                            h_flex()
-                                .gap_1()
-                                .child(
-                                    Icon::new(IconName::Diff)
-                                        .size(IconSize::Small)
-                                        .color(Color::Muted),
-                                )
-                                .child(
-                                    Label::new(t!("View Diff"))
-                                        .size(LabelSize::Small)
-                                        .color(Color::Muted),
-                                )
-                                .when(
-                                    GitPanelSettings::get_global(cx).diff_stats
-                                        && diff_stat_total != DiffStat::default(),
-                                    |this| {
-                                        this.child(ui::DiffStat::new(
-                                            "changes-diff-stat-total",
-                                            diff_stat_total.added as usize,
-                                            diff_stat_total.deleted as usize,
-                                        ))
-                                    },
-                                ),
-                        )
-                        .tooltip(Tooltip::for_action_title_in(
-                            t!("View Diff"),
-                            &Diff,
-                            &self.focus_handle,
-                        ))
-                        .on_click(|_, _, cx| {
-                            cx.defer(|cx| {
-                                cx.dispatch_action(&Diff);
+                            Icon::new(if self.changes_collapsed {
+                                IconName::ChevronRight
+                            } else {
+                                IconName::ChevronDown
                             })
-                        }),
+                            .size(IconSize::XSmall)
+                            .color(Color::Muted),
+                        )
+                        .child(
+                            Label::new(t!("Changes"))
+                                .weight(gpui::FontWeight::BOLD)
+                                .size(LabelSize::Small),
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.changes_collapsed = !this.changes_collapsed;
+                            cx.notify();
+                        })),
                 )
                 .child(
                     h_flex()
                         .gap_1()
+                        .child(
+                            IconButton::new("toolbar-commit", IconName::Check)
+                                .icon_size(IconSize::Medium)
+                                .tooltip(Tooltip::for_action_title_in(
+                                    t!("Commit"),
+                                    &git::Commit,
+                                    &self.focus_handle,
+                                ))
+                                .on_click(|_, _, cx| {
+                                    cx.defer(|cx| {
+                                        cx.dispatch_action(&git::Commit);
+                                    })
+                                }),
+                        )
+                        .child(
+                            IconButton::new("toolbar-refresh", IconName::ArrowCircle)
+                                .icon_size(IconSize::Medium)
+                                .tooltip(Tooltip::text(t!("Refresh")))
+                                .on_click(|_, _, cx| {
+                                    cx.defer(|cx| {
+                                        cx.dispatch_action(&git::Fetch);
+                                    })
+                                }),
+                        )
                         .child(self.render_view_options_menu("view_options_menu"))
-                        .child(self.render_git_changes_actions_button(cx)),
+                        .child(self.render_git_changes_actions_menu("git-changes-actions-menu", cx)),
+                ),
                 ),
         )
     }
@@ -6410,25 +6567,12 @@ impl GitPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<impl IntoElement> {
-        let active_repository = self.active_repository.clone()?;
+        self.active_repository.as_ref()?;
+        let commit_editor_focused = self.commit_editor.focus_handle(cx).contains_focused(window, cx);
         let settings = ThemeSettings::get_global(cx);
         let panel_editor_style =
             git_commit_editor_style(settings.git_commit_buffer_font_size(cx), cx);
         let enable_coauthors = self.render_co_authors(cx);
-        let editor_focus_handle = self.commit_editor.focus_handle(cx);
-        let branch = active_repository.read(cx).branch.clone();
-        let head_commit = active_repository.read(cx).head_commit.clone();
-
-        let git_panel = cx.entity();
-        let display_name = SharedString::from(Arc::from(
-            active_repository
-                .read(cx)
-                .display_name()
-                .trim_end_matches("/"),
-        ));
-        let editor_is_long = self.commit_editor.update(cx, |editor, cx| {
-            editor.max_point(cx).row().0 >= MAX_PANEL_EDITOR_LINES as u32
-        });
 
         let max_title_length = GitPanelSettings::get_global(cx).commit_title_max_length;
         let title_exceeds_limit = if max_title_length > 0 {
@@ -6442,66 +6586,8 @@ impl GitPanel {
             false
         };
 
-        let vertical_buttons = v_flex()
-            .h_full()
-            .gap_px()
-            .p_1p5()
-            .opacity(0.6)
-            .hover(|s| s.opacity(1.0))
-            .child(
-                IconButton::new("expand-commit-editor", IconName::MaximizeAlt)
-                    .icon_size(IconSize::Small)
-                    .tooltip({
-                        move |_window, cx| {
-                            Tooltip::for_action_in(
-                                t!("Open Commit Modal"),
-                                &git::ExpandCommitEditor,
-                                &editor_focus_handle,
-                                cx,
-                            )
-                        }
-                    })
-                    .on_click(cx.listener({
-                        move |_, _, window, cx| {
-                            window.dispatch_action(git::ExpandCommitEditor.boxed_clone(), cx)
-                        }
-                    })),
-            )
-            .child({
-                let (icon, label) = if self.commit_editor_expanded {
-                    (IconName::Minimize, t!("Collapse Commit Editor"))
-                } else {
-                    (IconName::Maximize, t!("Expand Commit Editor"))
-                };
-                let focus_handle = self.focus_handle.clone();
-
-                IconButton::new("fill-commit-editor", icon)
-                    .icon_size(IconSize::Small)
-                    .tooltip({
-                        move |_window, cx| {
-                            Tooltip::for_action_in(
-                                label.clone(),
-                                &git::ToggleFillCommitEditor,
-                                &focus_handle,
-                                cx,
-                            )
-                        }
-                    })
-                    .on_click(cx.listener({
-                        move |_, _, window, cx| {
-                            window.dispatch_action(git::ToggleFillCommitEditor.boxed_clone(), cx)
-                        }
-                    }))
-            });
-
         let footer = v_flex()
             .when(self.commit_editor_expanded, |this| this.flex_1().min_h_0())
-            .child(PanelRepoFooter::new(
-                display_name,
-                branch,
-                head_commit,
-                Some(git_panel),
-            ))
             .when(title_exceeds_limit, |this| {
                 this.child(
                     h_flex()
@@ -6526,62 +6612,64 @@ impl GitPanel {
                 )
             })
             .child(
-                panel_editor_container(window, cx)
+                v_flex()
                     .id("commit-editor-container")
                     .w_full()
+                    .px_2()
+                    .pb_2()
+                    .gap_2()
                     .when(self.commit_editor_expanded, |this| this.flex_1().min_h_0())
-                    .border_t_1()
-                    .border_color(if title_exceeds_limit {
-                        cx.theme().status().warning_border
-                    } else {
-                        cx.theme().colors().border
-                    })
-                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                        window.focus(&this.commit_editor.focus_handle(cx), cx);
-                    }))
                     .child(
-                        h_flex()
-                            .size_full()
-                            .child(
-                                div()
-                                    .pt_2()
-                                    .px_2()
-                                    .h_full()
-                                    .flex_grow_1()
-                                    .cursor_text()
-                                    .on_action(|&crab_actions::editor::MoveUp, _, cx| {
-                                        cx.stop_propagation();
-                                    })
-                                    .on_action(|&crab_actions::editor::MoveDown, _, cx| {
-                                        cx.stop_propagation();
-                                    })
-                                    .child(EditorElement::new(
-                                        &self.commit_editor,
-                                        panel_editor_style,
-                                    )),
-                            )
-                            .child(vertical_buttons),
+                        div()
+                            .id("commit-input-box")
+                            .w_full()
+                            .when(self.commit_editor_expanded, |this| this.flex_1().min_h_0())
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(if title_exceeds_limit {
+                                cx.theme().status().warning_border
+                            } else if commit_editor_focused {
+                                cx.theme().status().info
+                            } else {
+                                cx.theme().colors().border
+                            })
+                            .bg(gpui::rgb(0x3c3c3c))
+                            .min_h_8()
+                            .py_0p5()
+                            .px_2()
+                            .cursor_text()
+                            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                window.focus(&this.commit_editor.focus_handle(cx), cx);
+                            }))
+                            .on_action(|&crab_actions::editor::MoveUp, _, cx| {
+                                cx.stop_propagation();
+                            })
+                            .on_action(|&crab_actions::editor::MoveDown, _, cx| {
+                                cx.stop_propagation();
+                            })
+                            .child(EditorElement::new(
+                                &self.commit_editor,
+                                panel_editor_style,
+                            )),
                     )
                     .child(
                         h_flex()
                             .id("commit-footer")
                             .w_full()
-                            .p_1p5()
-                            .border_t_1()
-                            .when(editor_is_long, |el| {
-                                el.border_color(cx.theme().colors().border_variant)
-                            })
                             .justify_between()
-                            .child(
-                                self.render_generate_commit_message_button(cx)
-                                    .unwrap_or_else(|| div().into_any_element()),
-                            )
-                            .child(
-                                h_flex()
-                                    .gap_0p5()
-                                    .children(enable_coauthors)
-                                    .child(self.render_commit_button(cx)),
-                            ),
+                            .child(h_flex().flex_1().gap_0p5().children(enable_coauthors).map(
+                                |this| {
+                                    let nothing_to_commit =
+                                        self.entry_count == 0 && !self.amend_pending;
+                                    match nothing_to_commit
+                                        .then(|| self.render_remote_button(cx))
+                                        .flatten()
+                                    {
+                                        Some(remote) => this.child(remote),
+                                        None => this.child(self.render_commit_button(cx)),
+                                    }
+                                },
+                            )),
                     ),
             );
 
@@ -6600,26 +6688,41 @@ impl GitPanel {
         let label_color = if self.pending_commit.is_some() {
             Color::Disabled
         } else {
-            Color::Default
+            Color::Custom(gpui::white())
         };
 
-        h_flex()
-            .id("commit-wrapper")
-            .on_hover(cx.listener(move |this, hovered, _, cx| {
-                this.show_placeholders =
-                    *hovered && !this.has_staged_changes() && !this.has_unstaged_conflicts();
-                cx.notify()
-            }))
-            .child(SplitButton::new(
-                ButtonLike::new_rounded_left(format!("split-button-left-{}", title))
+        let merging = !self.amend_pending
+            && self
+                .active_repository
+                .as_ref()
+                .is_some_and(|repo| repo.read(cx).merge.message.is_some());
+        let title = if merging { t!("Continue") } else { title };
+        let left_id = format!("split-button-left-{}", title);
+        let left = if merging {
+            ButtonLike::new_rounded_all(left_id)
+        } else {
+            ButtonLike::new_rounded_left(left_id)
+        };
+
+        let left = left
                     .layer(ElevationIndex::ModalSurface)
-                    .size(ButtonSize::Compact)
+                    .size(ButtonSize::Medium)
+                    .full_width()
+                    .style(ButtonStyle::Tinted(ui::TintColor::Solid))
                     .disabled(!can_commit || self.modal_open)
                     .child(
-                        Label::new(title.clone())
-                            .size(LabelSize::Small)
-                            .color(label_color)
-                            .mr_0p5(),
+                        h_flex()
+                            .gap_1()
+                            .child(
+                                Icon::new(IconName::Check)
+                                    .size(IconSize::XSmall)
+                                    .color(label_color),
+                            )
+                            .child(
+                                Label::new(title.clone())
+                                    .size(LabelSize::Small)
+                                    .color(label_color),
+                            ),
                     )
                     .on_click({
                         let git_panel = cx.weak_entity();
@@ -6652,14 +6755,30 @@ impl GitPanel {
                                 Tooltip::simple(tooltip.clone(), cx)
                             }
                         }
-                    }),
-                self.render_git_commit_menu(
-                    ElementId::Name(format!("split-button-right-{}", title).into()),
-                    Some(commit_tooltip_focus_handle),
-                    cx,
+                    });
+
+        v_flex()
+            .id("commit-wrapper")
+            .w_full()
+            .on_hover(cx.listener(move |this, hovered, _, cx| {
+                this.show_placeholders =
+                    *hovered && !this.has_staged_changes() && !this.has_unstaged_conflicts();
+                cx.notify()
+            }))
+            .child(if merging {
+                div().w_full().child(left).into_any_element()
+            } else {
+                split_commit_button(
+                    left,
+                    self.render_git_commit_menu(
+                        ElementId::Name(format!("split-button-right-{}", title).into()),
+                        Some(commit_tooltip_focus_handle),
+                        cx,
+                    )
+                    .into_any_element(),
                 )
-                .into_any_element(),
-            ))
+                .into_any_element()
+            })
     }
 
     fn render_pending_amend(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -6756,7 +6875,7 @@ impl GitPanel {
                             let has_unstaged = self.has_unstaged_changes();
                             this.child(
                                 IconButton::new("undo", IconName::Undo)
-                                    .icon_size(IconSize::Small)
+                                    .icon_size(IconSize::Medium)
                                     .tooltip(move |_window, cx| {
                                         Tooltip::with_meta(
                                             t!("Uncommit"),
@@ -6778,7 +6897,7 @@ impl GitPanel {
                         })
                         .child(
                             IconButton::new("git-graph-button", IconName::GitGraph)
-                                .icon_size(IconSize::Small)
+                                .icon_size(IconSize::Medium)
                                 .tooltip(|_window, cx| {
                                     Tooltip::for_action(
                                         t!("Open Git Graph"),
@@ -6794,78 +6913,162 @@ impl GitPanel {
         )
     }
 
-    fn render_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let active_tab = self.active_tab;
+    fn render_commits_section(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let repo = self.active_repository.clone()?;
+        let collapsed = self.commits_collapsed;
+        let colors = cx.theme().colors();
+        let hover_bg = colors.ghost_element_hover;
+        let branch_name: Option<SharedString> = repo
+            .read(cx)
+            .branch
+            .as_ref()
+            .map(|branch| branch.name().to_string().into());
 
-        let focus_handle = self.focus_handle.clone();
-        let tab = |id: ElementId,
-                   active: bool,
-                   show_changes: bool,
-                   label: SharedString,
-                   tooltip: SharedString,
-                   set_active_tab: GitPanelTab,
-                   tooltip_action: Box<dyn Action>| {
-            let focus_handle = focus_handle.clone();
-
-            h_flex()
-                .cursor_pointer()
-                .id(id)
-                .h_full()
-                .py_1()
-                .gap_1()
-                .flex_1()
-                .justify_center()
-                .hover(|s| s.bg(cx.theme().colors().element_hover))
-                .border_b_1()
-                .when(!active, |s| {
-                    s.bg(cx.theme().colors().editor_background.opacity(0.6))
-                        .border_color(cx.theme().colors().border.opacity(0.6))
-                })
-                .child(Label::new(label).when(!active, |this| this.color(Color::Muted)))
-                .when(show_changes && self.changes_count > 0, |this| {
-                    this.child(
-                        Label::new(format!("({})", self.changes_count))
-                            .size(LabelSize::Small)
-                            .color(Color::Muted),
-                    )
-                })
-                .tooltip(Tooltip::for_action_title_in(
-                    tooltip,
-                    tooltip_action.as_ref(),
-                    &focus_handle,
-                ))
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.set_active_tab(set_active_tab, window, cx)
-                }))
-        };
-
-        h_flex()
-            .relative()
-            .h(Tab::container_height(cx))
+        let header = h_flex()
+            .id("commits-header")
+            .h(self.list_item_height())
             .w_full()
-            .child(tab(
-                ElementId::Name("changes-tab".into()),
-                active_tab == GitPanelTab::Changes,
-                true,
-                t!("Changes"),
-                t!("Toggle Changes Tab"),
-                GitPanelTab::Changes,
-                ActivateChangesTab.boxed_clone(),
-            ))
+            .pl_2p5()
+            .pr_2()
+            .gap_1()
+            .cursor_pointer()
+            .border_t_1()
+            .border_color(colors.border_variant)
+            .hover(|style| style.bg(hover_bg))
+            .items_baseline()
             .child(
-                Divider::vertical()
-                    .color(ui::DividerColor::BorderFaded)
-                    .h_full(),
+                div().self_center().child(
+                    Icon::new(if collapsed {
+                        IconName::ChevronRight
+                    } else {
+                        IconName::ChevronDown
+                    })
+                    .size(IconSize::XSmall)
+                    .color(Color::Muted),
+                ),
             )
-            .child(tab(
-                ElementId::Name("history-tab".into()),
-                active_tab != GitPanelTab::Changes,
-                false,
-                t!("History"),
-                t!("Toggle History Tab"),
-                GitPanelTab::History,
-                ActivateHistoryTab.boxed_clone(),
-            ))
+            .child(
+                Label::new(t!("Commits"))
+                    .weight(gpui::FontWeight::BOLD)
+                    .size(LabelSize::Small),
+            )
+            .children(branch_name.map(|name| {
+                Label::new(name)
+                    .size(LabelSize::Small)
+                    .color(Color::Muted)
+                    .single_line()
+                    .truncate()
+            }))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.commits_collapsed = !this.commits_collapsed;
+                cx.notify();
+            }));
+
+        let upstream = repo
+            .read(cx)
+            .branch
+            .as_ref()
+            .and_then(|branch| branch.upstream.clone());
+        let sync_row = upstream.map(|upstream| {
+            let upstream_name: SharedString = upstream
+                .stripped_ref_name()
+                .unwrap_or(upstream.ref_name.as_ref())
+                .to_string()
+                .into();
+            let status = upstream.tracking.status();
+            let (ahead, behind) = status.map(|s| (s.ahead, s.behind)).unwrap_or((0, 0));
+            let text: SharedString = if ahead == 0 && behind == 0 {
+                t!("Up to date with {upstream}")
+                    .replace("{upstream}", &upstream_name)
+                    .into()
+            } else {
+                t!("{ahead} ahead, {behind} behind {upstream}")
+                    .replace("{ahead}", &ahead.to_string())
+                    .replace("{behind}", &behind.to_string())
+                    .replace("{upstream}", &upstream_name)
+                    .into()
+            };
+            h_flex()
+                .id("commits-sync-row")
+                .h(self.list_item_height())
+                .w_full()
+                .pl_5()
+                .pr_2()
+                .gap_1p5()
+                .cursor_pointer()
+                .hover(|style| style.bg(hover_bg))
+                .child(
+                    Icon::new(IconName::ArrowCircle)
+                        .size(IconSize::Small)
+                        .color(Color::Muted),
+                )
+                .child(Label::new(text).single_line().truncate())
+                .on_click(move |_, _, cx| {
+                    cx.defer(move |cx| {
+                        if behind > 0 {
+                            cx.dispatch_action(&git::Pull);
+                        } else if ahead > 0 {
+                            cx.dispatch_action(&git::Push);
+                        } else {
+                            cx.dispatch_action(&git::Fetch);
+                        }
+                    })
+                })
+        });
+
+        let body = (!collapsed).then(|| {
+            v_flex()
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .overflow_hidden()
+                .children(sync_row)
+                .child(
+                    h_flex()
+                        .id("commits-compare-row")
+                        .h(self.list_item_height())
+                        .w_full()
+                        .pl_5()
+                        .pr_2()
+                        .gap_1p5()
+                        .cursor_pointer()
+                        .hover(|style| style.bg(hover_bg))
+                        .child(
+                            Icon::new(IconName::Diff)
+                                .size(IconSize::Small)
+                                .color(Color::Muted),
+                        )
+                        .child(
+                            Label::new(t!("Compare with base branch"))
+                                .single_line()
+                                .truncate(),
+                        )
+                        .on_click(|_, _, cx| {
+                            cx.defer(|cx| {
+                                cx.dispatch_action(&crate::project_diff::DeployBranchDiff);
+                            })
+                        }),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .w_full()
+                        .overflow_hidden()
+                        .child(self.render_history_tab(window, cx)),
+                )
+        });
+
+        Some(
+            self.section_container(SECTION_COMMITS, cx)
+                .child(header)
+                .children(body)
+                .into_any_element(),
+        )
     }
 
     fn render_history_tab(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -6945,11 +7148,67 @@ impl GitPanel {
     fn confirm_history_row(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.focused_history_row() {
             Some(HistoryRow::Commit(commit)) => self.toggle_history_commit(commit, cx),
-            Some(HistoryRow::File { commit, file }) => {
+            Some(HistoryRow::File { commit, file, .. }) => {
                 self.open_history_file(commit, file, false, window, cx)
             }
+            Some(HistoryRow::Dir {
+                commit,
+                file,
+                start,
+                span,
+                ..
+            }) => self.toggle_history_dir(commit, file, start, span, cx),
             Some(HistoryRow::FilesStatus(_)) | None => {}
         }
+    }
+
+    fn history_dir_info(
+        &self,
+        commit: usize,
+        file: usize,
+        start: usize,
+        span: usize,
+    ) -> Option<(SharedString, String)> {
+        let file = self.history_commit_file(commit, file)?;
+        let path = file.path.as_unix_str();
+        let components: Vec<&str> = path.split('/').collect();
+        let end = (start + span).min(components.len());
+        Some((
+            components[start..end].join("/").into(),
+            components[..end].join("/"),
+        ))
+    }
+
+    fn is_history_dir_collapsed(&self, commit: usize, path: &str) -> bool {
+        self.commit_history_entries()
+            .get(commit)
+            .is_some_and(|entry| {
+                self.collapsed_history_dirs
+                    .contains(&(entry.sha, path.to_string()))
+            })
+    }
+
+    fn toggle_history_dir(
+        &mut self,
+        commit: usize,
+        file: usize,
+        start: usize,
+        span: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(sha) = self.commit_history_entries().get(commit).map(|e| e.sha) else {
+            return;
+        };
+        let Some((_, path)) = self.history_dir_info(commit, file, start, span) else {
+            return;
+        };
+        let key = (sha, path);
+        if !self.collapsed_history_dirs.remove(&key) {
+            self.collapsed_history_dirs.insert(key);
+        }
+        let anchor = self.history_anchor();
+        self.rebuild_history_rows(anchor, cx);
+        cx.notify();
     }
 
     fn expand_history_row(&mut self, cx: &mut Context<Self>) {
@@ -6957,14 +7216,44 @@ impl GitPanel {
             Some(HistoryRow::Commit(commit)) if !self.is_history_commit_expanded(commit) => {
                 self.toggle_history_commit(commit, cx)
             }
+            Some(HistoryRow::Dir {
+                commit,
+                file,
+                start,
+                span,
+                ..
+            }) if self
+                .history_dir_info(commit, file, start, span)
+                .is_some_and(|(_, path)| self.is_history_dir_collapsed(commit, &path)) =>
+            {
+                self.toggle_history_dir(commit, file, start, span, cx)
+            }
             _ => self.select_next_history_entry(cx),
         }
     }
 
     fn collapse_history_row(&mut self, cx: &mut Context<Self>) {
+        if let Some(HistoryRow::Dir {
+            commit,
+            file,
+            start,
+            span,
+            ..
+        }) = self.focused_history_row()
+            && self
+                .history_dir_info(commit, file, start, span)
+                .is_some_and(|(_, path)| !self.is_history_dir_collapsed(commit, &path))
+        {
+            self.toggle_history_dir(commit, file, start, span, cx);
+            return;
+        }
         let commit = match self.focused_history_row() {
             Some(HistoryRow::Commit(commit)) if self.is_history_commit_expanded(commit) => commit,
-            Some(HistoryRow::File { commit, .. } | HistoryRow::FilesStatus(commit)) => commit,
+            Some(
+                HistoryRow::File { commit, .. }
+                | HistoryRow::FilesStatus(commit)
+                | HistoryRow::Dir { commit, .. },
+            ) => commit,
             _ => {
                 self.select_previous_history_entry(cx);
                 return;
@@ -7159,10 +7448,16 @@ impl GitPanel {
         let entries = self.commit_history_entries();
         Some(match row {
             HistoryRow::Commit(commit) => HistoryRowKey::Commit(entries.get(commit)?.sha),
-            HistoryRow::File { commit, file } => {
+            HistoryRow::File { commit, file, .. } => {
                 HistoryRowKey::File(entries.get(commit)?.sha, file)
             }
             HistoryRow::FilesStatus(commit) => HistoryRowKey::FilesStatus(entries.get(commit)?.sha),
+            HistoryRow::Dir {
+                commit,
+                file,
+                depth,
+                ..
+            } => HistoryRowKey::Dir(entries.get(commit)?.sha, file, depth),
         })
     }
 
@@ -7189,7 +7484,9 @@ impl GitPanel {
         }
         let commit = match key {
             HistoryRowKey::Commit(_) => return None,
-            HistoryRowKey::File(sha, _) | HistoryRowKey::FilesStatus(sha) => {
+            HistoryRowKey::File(sha, _)
+            | HistoryRowKey::FilesStatus(sha)
+            | HistoryRowKey::Dir(sha, _, _) => {
                 HistoryRowKey::Commit(sha)
             }
         };
@@ -7200,6 +7497,7 @@ impl GitPanel {
     }
 
     fn rebuild_history_rows(&mut self, anchor: HistoryAnchor, cx: &mut Context<Self>) {
+        let tree_view = GitPanelSettings::get_global(cx).tree_view;
         let entries = self.commit_history_entries();
         let mut rows = Vec::with_capacity(entries.len());
         for (commit, entry) in entries.iter().enumerate() {
@@ -7207,7 +7505,37 @@ impl GitPanel {
             match self.expanded_history_commits.get(&entry.sha) {
                 None | Some(HistoryCommitFiles::Loading { visible: false, .. }) => {}
                 Some(HistoryCommitFiles::Loaded(files)) if !files.is_empty() => {
-                    rows.extend((0..files.len()).map(|file| HistoryRow::File { commit, file }))
+                    if tree_view {
+                        let mut root = HistoryTreeNode::default();
+                        root.first_file = usize::MAX;
+                        for (file, history_file) in files.iter().enumerate() {
+                            let components: Vec<&str> =
+                                history_file.path.as_unix_str().split('/').collect();
+                            let mut node = &mut root;
+                            for name in &components[..components.len().saturating_sub(1)] {
+                                node = node.dirs.entry(name.to_string()).or_insert_with(|| {
+                                    HistoryTreeNode {
+                                        first_file: usize::MAX,
+                                        ..Default::default()
+                                    }
+                                });
+                                node.first_file = node.first_file.min(file);
+                            }
+                            node.files.push(file);
+                        }
+                        let sha = entry.sha;
+                        let collapsed = |path: &str| {
+                            self.collapsed_history_dirs
+                                .contains(&(sha, path.to_string()))
+                        };
+                        push_history_tree_rows(&root, commit, 0, 0, "", &collapsed, &mut rows);
+                    } else {
+                        rows.extend((0..files.len()).map(|file| HistoryRow::File {
+                            commit,
+                            file,
+                            depth: 0,
+                        }));
+                    }
                 }
                 Some(_) => rows.push(HistoryRow::FilesStatus(commit)),
             }
@@ -7232,9 +7560,9 @@ impl GitPanel {
                     .iter()
                     .map(|row| match row {
                         HistoryRow::Commit(_) => HISTORY_COMMIT_ROW_HEIGHT,
-                        HistoryRow::File { .. } | HistoryRow::FilesStatus(_) => {
-                            HISTORY_FILE_ROW_HEIGHT
-                        }
+                        HistoryRow::File { .. }
+                        | HistoryRow::FilesStatus(_)
+                        | HistoryRow::Dir { .. } => HISTORY_FILE_ROW_HEIGHT,
                     }),
             );
         }
@@ -7319,10 +7647,7 @@ impl GitPanel {
             GitPanelTab::History => {
                 self.load_commit_history(cx);
             }
-            GitPanelTab::Changes => {
-                self.set_commit_history(CommitHistory::Loading, cx);
-                self._repo_subscriptions.clear();
-            }
+            GitPanelTab::Changes => {}
         }
         cx.notify();
     }
@@ -7354,9 +7679,7 @@ impl GitPanel {
                 &active_repository,
                 |this, _repo, event, cx| {
                     if let RepositoryEvent::GraphEvent(_, _) = event {
-                        if this.active_tab == GitPanelTab::History {
-                            this.fetch_commit_history_entries(cx);
-                        }
+                        this.fetch_commit_history_entries(cx);
                     }
                 },
             ));
@@ -7473,10 +7796,19 @@ impl GitPanel {
             Some(HistoryRow::Commit(commit)) => {
                 self.render_history_commit_row(row_index, commit, window, cx)
             }
-            Some(HistoryRow::File { commit, file }) => {
-                self.render_history_file_row(row_index, commit, file, window, cx)
-            }
+            Some(HistoryRow::File {
+                commit,
+                file,
+                depth,
+            }) => self.render_history_file_row(row_index, commit, file, depth, window, cx),
             Some(HistoryRow::FilesStatus(commit)) => self.render_history_files_status(commit),
+            Some(HistoryRow::Dir {
+                commit,
+                file,
+                depth,
+                start,
+                span,
+            }) => self.render_history_dir_row(row_index, commit, file, depth, start, span, cx),
             None => Empty.into_any_element(),
         }
     }
@@ -7524,7 +7856,6 @@ impl GitPanel {
         let sha_string = entry.sha.to_string();
         let sha_shared: SharedString = sha_string.clone().into();
         let short_sha: SharedString = sha_string[..7.min(sha_string.len())].to_string().into();
-        let tag_names = entry.tag_names;
 
         let (subject, author_name, author_email, timestamp): (
             SharedString,
@@ -7556,27 +7887,29 @@ impl GitPanel {
             })
             .unwrap_or_else(|| "".into());
 
+        let avatar_email = author_email.clone();
         let avatar = CommitAvatar::new(&sha_shared, author_email, remote.as_ref())
             .size(px(14.))
             .render(window, cx);
 
         let is_unpushed = commit < ahead_count;
 
-        let dot_separator = || {
-            Label::new("•")
-                .size(LabelSize::Small)
-                .color(Color::Muted)
-                .alpha(0.5)
-                .flex_none()
+        let avatar_tooltip: SharedString = match &avatar_email {
+            Some(email) if !author_name.is_empty() => format!("{} <{}>", author_name, email).into(),
+            _ if !author_name.is_empty() => author_name.clone(),
+            _ => short_sha.clone(),
         };
+        let row_group: SharedString = format!("commit_row_{}", row_index).into();
+        let copy_sha = sha_string.clone();
 
-        v_flex()
+        h_flex()
             .id(("commit-history-item", row_index))
+            .group(row_group.clone())
             .cursor_pointer()
             .w_full()
-            .py_1()
+            .h(self.list_item_height())
             .px_2()
-            .gap_0p5()
+            .gap_1p5()
             .border_1()
             .border_color(gpui::transparent_black())
             .when(self.history_row_is_focused(row_index, window), |this| {
@@ -7587,82 +7920,77 @@ impl GitPanel {
                 this.bg(cx.theme().colors().element_hover)
             })
             .child(
+                Icon::new(if is_expanded {
+                    IconName::ChevronDown
+                } else {
+                    IconName::ChevronRight
+                })
+                .size(IconSize::XSmall)
+                .color(Color::Muted),
+            )
+            .child(
+                div()
+                    .id(("commit-history-avatar", row_index))
+                    .flex_none()
+                    .child(avatar)
+                    .tooltip(Tooltip::text(avatar_tooltip)),
+            )
+            .child(
                 h_flex()
-                    .gap_1()
-                    .w_full()
+                    .flex_1()
                     .min_w_0()
-                    .child(Label::new(subject).truncate())
-                    .children((!tag_names.is_empty()).then(|| {
-                        let hidden_tag_count =
-                            tag_names.len().saturating_sub(MAX_HISTORY_TAG_CHIPS);
-                        h_flex()
-                            .gap_1()
+                    .gap_1p5()
+                    .items_baseline()
+                    .child(
+                        div()
+                            .flex_1()
                             .min_w_0()
-                            .children(tag_names.iter().take(MAX_HISTORY_TAG_CHIPS).map(
-                                |tag_name| {
-                                    let tag_name = tag_name.clone();
-                                    Chip::new(tag_name.clone())
-                                        .truncate()
-                                        .when(!has_context_menu, |chip| {
-                                            chip.tooltip(Tooltip::text(tag_name))
-                                        })
-                                },
-                            ))
-                            .when(hidden_tag_count > 0, |this| {
-                                let hidden_tag_names =
-                                    tag_names[MAX_HISTORY_TAG_CHIPS..].join(", ");
-                                this.child(
-                                    Chip::new(format!("+{hidden_tag_count}"))
-                                        .bg_color(cx.theme().colors().element_active.opacity(0.8))
-                                        .when(!has_context_menu, |chip| {
-                                            chip.tooltip(Tooltip::text(hidden_tag_names))
-                                        }),
-                                )
-                            })
-                    }))
+                            .child(Label::new(subject).size(LabelSize::Small).truncate()),
+                    )
                     .when(is_unpushed, |this| {
                         this.child(
-                            h_flex()
-                                .size_4()
-                                .flex_none()
-                                .justify_center()
-                                .rounded_sm()
-                                .border_1()
-                                .border_color(cx.theme().colors().border)
-                                .bg(cx.theme().colors().element_background)
-                                .child(Icon::new(IconName::ArrowUp).size(IconSize::XSmall)),
+                            div().self_center().child(
+                                Icon::new(IconName::ArrowUp)
+                                    .size(IconSize::XSmall)
+                                    .color(Color::Muted),
+                            ),
+                        )
+                    })
+                    .when(!relative_time.is_empty(), |this| {
+                        this.child(
+                            div().flex_none().relative().top(px(0.75)).child(
+                                Label::new(relative_time)
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted),
+                            ),
+                        )
+                    })
+                    .when(!author_name.is_empty(), |this| {
+                        this.child(
+                            div().min_w_0().max_w(rems(7.)).relative().top(px(0.75)).child(
+                                Label::new(author_name.clone())
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted)
+                                    .truncate(),
+                            ),
                         )
                     }),
             )
             .child(
-                h_flex()
-                    .w_full()
-                    .min_w_0()
-                    .gap_1p5()
-                    .child(div().flex_none().child(avatar))
-                    .when(!author_name.is_empty(), |this| {
-                        this.child(
-                            Label::new(author_name)
-                                .size(LabelSize::Small)
-                                .color(Color::Muted)
-                                .truncate(),
-                        )
-                        .child(dot_separator())
-                    })
-                    .when(!relative_time.is_empty(), |this| {
-                        this.child(
-                            Label::new(relative_time)
-                                .size(LabelSize::Small)
-                                .color(Color::Muted)
-                                .flex_none(),
-                        )
-                        .child(dot_separator())
-                    })
+                div()
+                    .flex_none()
+                    .invisible()
+                    .group_hover(row_group, |style| style.visible())
                     .child(
-                        Label::new(short_sha.clone())
-                            .size(LabelSize::Small)
-                            .color(Color::Muted)
-                            .flex_none(),
+                        IconButton::new(("commit-history-copy", row_index), IconName::Copy)
+                            .icon_size(IconSize::XSmall)
+                            .tooltip(Tooltip::text(t!("Copy Commit SHA")))
+                            .on_click(move |_, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(
+                                    copy_sha.clone(),
+                                ));
+                                cx.stop_propagation();
+                            }),
                     ),
             )
             .when(!has_context_menu, |this| {
@@ -7687,6 +8015,7 @@ impl GitPanel {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _, _, cx| {
+                    this.active_tab = GitPanelTab::History;
                     this.focused_history_entry = Some(row_index);
                     this.history_keyboard_nav = false;
                     cx.notify();
@@ -7715,6 +8044,7 @@ impl GitPanel {
         row_index: usize,
         commit: usize,
         file_index: usize,
+        depth: usize,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -7740,44 +8070,71 @@ impl GitPanel {
         else {
             return Empty.into_any_element();
         };
-        let status = FileStatus::Tracked(TrackedStatus {
-            index_status: file.status,
-            worktree_status: StatusCode::Unmodified,
-        });
+        let (status_letter, status_color) = history_status_style(file.status);
+        let tree_view = GitPanelSettings::get_global(cx).tree_view;
+        let (indent, directory) = if tree_view {
+            (px(depth as f32 * TREE_INDENT), SharedString::default())
+        } else {
+            (px(0.), directory)
+        };
+        let file_icon =
+            self.history_file_icon(file.path.as_unix_str(), file.status, tree_view, cx);
 
         h_flex()
             .id(("commit-history-file", row_index))
+            .relative()
+            .children(history_indent_guides(if tree_view { depth } else { 0 }, cx))
             .cursor_pointer()
             .w_full()
             .min_w_0()
-            .py_0p5()
-            .pl_6()
-            .pr_2()
-            .gap_1p5()
+            .h(self.list_item_height())
+            .pl(px(HISTORY_CHILD_INDENT) + indent)
+            .pr_1()
+            .gap_1()
+            .children(file_icon)
             .border_1()
             .border_color(gpui::transparent_black())
             .when(self.history_row_is_focused(row_index, window), |this| {
                 this.border_color(cx.theme().colors().panel_focused_border)
             })
             .hover(|s| s.bg(cx.theme().colors().element_hover))
-            .child(git_status_icon(status))
             .child(
-                Label::new(file_name)
-                    .size(LabelSize::Small)
-                    .flex_none()
-                    .truncate(),
+                h_flex()
+                    .min_w_0()
+                    .flex_1()
+                    .gap_1()
+                    .items_baseline()
+                    .child(
+                        div().min_w_0().child(
+                            Label::new(file_name)
+                                .size(LabelSize::Small)
+                                .color(status_color)
+                                .when(file.status == StatusCode::Deleted, Label::strikethrough)
+                                .truncate(),
+                        ),
+                    )
+                    .when(!directory.is_empty(), |this| {
+                        this.child(
+                            div().min_w_0().flex_1().relative().top(px(0.75)).child(
+                                Label::new(directory)
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted)
+                                    .truncate_start(),
+                            ),
+                        )
+                    }),
             )
-            .when(!directory.is_empty(), |this| {
-                this.child(
-                    Label::new(directory)
+            .child(
+                div().w_4().flex_none().flex().justify_center().child(
+                    Label::new(status_letter)
                         .size(LabelSize::Small)
-                        .color(Color::Muted)
-                        .truncate_start(),
-                )
-            })
+                        .color(status_color),
+                ),
+            )
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _, _, cx| {
+                    this.active_tab = GitPanelTab::History;
                     this.focused_history_entry = Some(row_index);
                     this.history_keyboard_nav = false;
                     cx.notify();
@@ -7787,6 +8144,142 @@ impl GitPanel {
                 if let Some(commit) = this.history_commit_index(sha) {
                     this.open_history_file(commit, file_index, event.click_count() > 1, window, cx);
                 }
+            }))
+            .into_any_element()
+    }
+
+    fn history_folder_indicators(&self, path: &str, collapsed: bool, cx: &App) -> AnyElement {
+        let folder_indicator = GitPanelSettings::get_global(cx).folder_indicator;
+        let expanded = !collapsed;
+        let indicators = FileIcons::get_folder_indicators(
+            folder_indicator,
+            expanded,
+            std::path::Path::new(path),
+            cx,
+        );
+        let render = |themed: Option<SharedString>, fallback: IconName| {
+            themed
+                .map(Icon::from_path)
+                .unwrap_or_else(|| Icon::new(fallback))
+                .size(IconSize::Small)
+                .color(Color::Muted)
+        };
+        let mut children = Vec::new();
+        if folder_indicator.shows_chevron() {
+            children.push(render(
+                indicators.chevron,
+                if expanded {
+                    IconName::ChevronDown
+                } else {
+                    IconName::ChevronRight
+                },
+            ));
+        }
+        if folder_indicator.shows_icon() {
+            children.push(render(
+                indicators.icon,
+                if expanded {
+                    IconName::FolderOpen
+                } else {
+                    IconName::Folder
+                },
+            ));
+        }
+        h_flex()
+            .flex_none()
+            .gap_0p5()
+            .children(children)
+            .into_any_element()
+    }
+
+    fn history_file_icon(
+        &self,
+        path: &str,
+        status: StatusCode,
+        tree_view: bool,
+        cx: &App,
+    ) -> Option<AnyElement> {
+        let settings = GitPanelSettings::get_global(cx);
+        let status_icon = (settings.status_style != StatusStyle::LabelColor)
+            .then(|| git_status_icon(status.worktree()));
+        let file_icon = settings.file_icons.then(|| {
+            FileIcons::get_icon(std::path::Path::new(path), cx)
+                .map(Icon::from_path)
+                .unwrap_or_else(|| Icon::new(IconName::File))
+                .size(IconSize::Small)
+                .color(Color::Muted)
+        });
+        if file_icon.is_none() && status_icon.is_none() {
+            return None;
+        }
+        let folder_indicator = settings.folder_indicator;
+        let reserves_chevron_slot = tree_view
+            && file_icon.is_some()
+            && folder_indicator.shows_chevron()
+            && folder_indicator.shows_icon();
+        Some(
+            h_flex()
+                .flex_none()
+                .gap_1()
+                .when(reserves_chevron_slot, |this| {
+                    this.child(
+                        h_flex()
+                            .size(IconSize::Small.rems())
+                            .invisible()
+                            .flex_none(),
+                    )
+                })
+                .children(file_icon)
+                .children(status_icon)
+                .into_any_element(),
+        )
+    }
+
+    fn render_history_dir_row(
+        &self,
+        row_index: usize,
+        commit: usize,
+        file: usize,
+        depth: usize,
+        start: usize,
+        span: usize,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some((name, path)) = self.history_dir_info(commit, file, start, span) else {
+            return Empty.into_any_element();
+        };
+        let collapsed = self.is_history_dir_collapsed(commit, &path);
+        h_flex()
+            .id(("commit-history-dir", row_index))
+            .relative()
+            .children(history_indent_guides(depth, cx))
+            .cursor_pointer()
+            .w_full()
+            .min_w_0()
+            .h(self.list_item_height())
+            .pl(px(HISTORY_CHILD_INDENT) + px(depth as f32 * TREE_INDENT))
+            .pr_1()
+            .gap_1()
+            .border_1()
+            .border_color(gpui::transparent_black())
+            .hover(|s| s.bg(cx.theme().colors().element_hover))
+            .child(self.history_folder_indicators(&path, collapsed, cx))
+            .child(
+                div()
+                    .min_w_0()
+                    .child(Label::new(name).size(LabelSize::Small).truncate()),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _, cx| {
+                    this.active_tab = GitPanelTab::History;
+                    this.focused_history_entry = Some(row_index);
+                    this.history_keyboard_nav = false;
+                    cx.notify();
+                }),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.toggle_history_dir(commit, file, start, span, cx);
             }))
             .into_any_element()
     }
@@ -8026,6 +8519,12 @@ impl GitPanel {
             .size_full()
             .overflow_hidden()
             .relative()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, _| {
+                    this.active_tab = GitPanelTab::Changes;
+                }),
+            )
             .child(
                 h_flex()
                     .flex_1()
@@ -8167,7 +8666,6 @@ impl GitPanel {
         let weak = cx.weak_entity();
         let checkbox_weak = weak.clone();
         let stage_intent = StageIntent::for_section(section);
-        let toggle_state = stage_intent.checkbox_state(|| self.header_state(header.header));
         let is_collapsed = self.collapsed_sections.contains(&section);
 
         let all_conflicts_resolved = section == Section::Conflict
@@ -8206,17 +8704,27 @@ impl GitPanel {
                     )
                     .child(
                         Label::new(header.title())
-                            .color(Color::Muted)
+                            .color(Color::Default)
+                            .weight(gpui::FontWeight::NORMAL)
                             .size(LabelSize::Small),
                     ),
             )
             .child(if section_is_empty {
                 gpui::Empty.into_any_element()
             } else {
-                let checkbox = Checkbox::new(checkbox_id, toggle_state)
+                let group_hover: SharedString = format!("header_{}", ix).into();
+                let section_count = self.entries[ix + 1..]
+                    .iter()
+                    .take_while(|entry| !matches!(entry, GitListEntry::Header(_)))
+                    .filter(|entry| entry.status_entry().is_some())
+                    .count();
+                let stage_icon = match stage_intent {
+                    StageIntent::Unstage => IconName::Dash,
+                    _ => IconName::Plus,
+                };
+                let action_button = IconButton::new(checkbox_id, stage_icon)
+                    .icon_size(IconSize::Small)
                     .disabled(!has_write_access || all_conflicts_resolved)
-                    .fill()
-                    .elevation(ElevationIndex::Surface)
                     .on_click(move |_, window, cx| {
                         cx.stop_propagation();
                         if !has_write_access || all_conflicts_resolved {
@@ -8239,17 +8747,146 @@ impl GitPanel {
                 } else {
                     match stage_intent {
                         StageIntent::Stage => Some(t!("Stage All")),
-                        StageIntent::Unstage => Some(t!("Unstage All")),
+                        StageIntent::Unstage => Some(t!("Unstash All Changes")),
                         StageIntent::Toggle => None,
                     }
                 };
-                if let Some(label) = tooltip_label {
-                    checkbox
-                        .tooltip(move |_window, cx| Tooltip::simple(label.clone(), cx))
-                        .into_any_element()
+                let action_button = if let Some(label) = tooltip_label {
+                    action_button.tooltip(move |_window, cx| Tooltip::simple(label.clone(), cx))
                 } else {
-                    checkbox.into_any_element()
-                }
+                    action_button
+                };
+                let discard_entries: Vec<GitStatusEntry> = if section == Section::Unstaged {
+                    self.entries[ix + 1..]
+                        .iter()
+                        .take_while(|entry| !matches!(entry, GitListEntry::Header(_)))
+                        .filter_map(|entry| entry.status_entry().cloned())
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                let discard_weak = weak.clone();
+                let discard_button = (!discard_entries.is_empty() && has_write_access).then(|| {
+                    IconButton::new(
+                        ElementId::Name(format!("header_{}_discard", ix).into()),
+                        IconName::Undo,
+                    )
+                    .icon_size(IconSize::Small)
+                    .tooltip(Tooltip::text(t!("Discard All Changes")))
+                    .on_click(move |_, window, cx| {
+                        cx.stop_propagation();
+                        let entries = discard_entries.clone();
+                        discard_weak
+                            .update(cx, |this, cx| {
+                                this.revert_entries(entries, false, window, cx);
+                            })
+                            .ok();
+                    })
+                });
+                let section_entries: Vec<GitStatusEntry> = self.entries[ix + 1..]
+                    .iter()
+                    .take_while(|entry| !matches!(entry, GitListEntry::Header(_)))
+                    .filter_map(|entry| entry.status_entry().cloned())
+                    .collect();
+                let stash_button = matches!(section, Section::Staged | Section::Unstaged)
+                    .then(|| {
+                        let stash_weak = weak.clone();
+                        IconButton::new(
+                            ElementId::Name(format!("header_{}_stash", ix).into()),
+                            IconName::StashSave,
+                        )
+                        .icon_size(IconSize::Small)
+                        .tooltip(Tooltip::text(if section == Section::Staged {
+                            t!("Stash Staged Changes...")
+                        } else {
+                            t!("Stash Unstaged Changes...")
+                        }))
+                        .on_click(move |_, window, cx| {
+                            cx.stop_propagation();
+                            stash_weak
+                                .update(cx, |this, cx| {
+                                    if section == Section::Staged {
+                                        this.stash_staged(&StashStaged, window, cx);
+                                    } else {
+                                        this.stash_tracked(&StashTracked, window, cx);
+                                    }
+                                })
+                                .ok();
+                        })
+                    });
+                let open_button = {
+                    let open_weak = weak.clone();
+                    let open_entries = section_entries.clone();
+                    IconButton::new(
+                        ElementId::Name(format!("header_{}_open", ix).into()),
+                        if section == Section::Conflict {
+                            IconName::GoToFile
+                        } else {
+                            IconName::DiffMultiple
+                        },
+                    )
+                    .icon_size(IconSize::Small)
+                    .tooltip(Tooltip::text(match section {
+                        Section::Conflict => t!("Open File"),
+                        Section::Staged => t!("Open Staged Changes"),
+                        _ => t!("Open Changes"),
+                    }))
+                    .on_click(move |_, window, cx| {
+                        cx.stop_propagation();
+                        let open_entries = open_entries.clone();
+                        open_weak
+                            .update(cx, |this, cx| match section {
+                                Section::Conflict => {
+                                    this.open_files_for_entries(&open_entries, window, cx)
+                                }
+                                Section::Staged => {
+                                    if let Some(workspace) = this.workspace.upgrade() {
+                                        workspace.update(cx, |workspace, cx| {
+                                            StagedDiff::deploy_at(workspace, None, window, cx);
+                                        });
+                                    }
+                                }
+                                _ => {
+                                    if let Some(workspace) = this.workspace.upgrade() {
+                                        workspace.update(cx, |workspace, cx| {
+                                            UnstagedDiff::deploy_at(workspace, None, window, cx);
+                                        });
+                                    }
+                                }
+                            })
+                            .ok();
+                    })
+                };
+                h_flex()
+                    .gap_1()
+                    .child(
+                        h_flex()
+                            .invisible()
+                            .group_hover(group_hover, |style| style.visible())
+                            .children(stash_button)
+                            .child(open_button)
+                            .children(discard_button)
+                            .when(section != Section::Conflict, |this| {
+                                this.child(action_button)
+                            }),
+                    )
+                    .child(
+                        div()
+                            .min_w_4()
+                            .h_4()
+                            .px_1()
+                            .rounded_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .bg(cx.theme().status().info)
+                            .child(
+                                Label::new(section_count.to_string())
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Custom(cx.theme().colors().editor_background)),
+                            ),
+                    )
+                    .into_any_element()
             })
             .on_click(move |_, window, cx| {
                 weak.update(cx, |this, cx| {
@@ -8258,6 +8895,730 @@ impl GitPanel {
                 .ok();
             })
             .into_any_element()
+    }
+
+    fn growing_sections(&self, cx: &App) -> [bool; 4] {
+        let stash_count = self
+            .active_repository
+            .as_ref()
+            .map_or(0, |repo| repo.read(cx).cached_stash().entries.len());
+        [
+            !self.changes_collapsed,
+            !self.commits_collapsed && !self.commit_editor_expanded,
+            !self.stashes_collapsed && stash_count > 0,
+            !self.worktrees_collapsed && !self.worktrees.is_empty(),
+        ]
+    }
+
+    fn section_container(&self, index: usize, cx: &mut Context<Self>) -> Div {
+        let growing = self.growing_sections(cx);
+        let bounds = self.section_bounds.clone();
+        let container = v_flex()
+            .relative()
+            .w_full()
+            .min_h_0()
+            .overflow_hidden()
+            .child(
+                canvas(
+                    move |section_bounds, _, _| {
+                        let mut all = bounds.get();
+                        all[index] = section_bounds;
+                        bounds.set(all);
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full(),
+            );
+        if !growing[index] {
+            return container.flex_none();
+        }
+        let mut container = container.flex_1();
+        container.style().flex_grow = Some(self.section_weights[index]);
+        match (0..index).rev().find(|upper| growing[*upper]) {
+            Some(upper) => container.child(self.render_section_sash(upper, index, cx)),
+            None => container,
+        }
+    }
+
+    fn render_section_sash(
+        &self,
+        upper: usize,
+        lower: usize,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let sash_color = cx.theme().colors().border_focused;
+        let dragging = self.sash_drag.is_some_and(|drag| drag.lower == lower)
+            && cx.active_drag_value::<DraggedSash>().is_some();
+        div()
+            .id(("section-sash", lower))
+            .absolute()
+            .top_0()
+            .left_0()
+            .right_0()
+            .h(px(4.))
+            .cursor_row_resize()
+            .hover(move |style| style.bg(sash_color))
+            .when(dragging, move |style| style.bg(sash_color))
+            .on_drag(DraggedSash, |dragged, _, _, cx| {
+                cx.stop_propagation();
+                cx.new(|_| *dragged)
+            })
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    let growing = this.growing_sections(cx);
+                    let bounds = this.section_bounds.get();
+                    for (index, grows) in growing.iter().enumerate() {
+                        if *grows {
+                            this.section_weights[index] =
+                                f32::from(bounds[index].size.height).max(1.);
+                        }
+                    }
+                    this.sash_drag = Some(SashDrag {
+                        upper,
+                        lower,
+                        start_y: event.position.y,
+                        upper_height: bounds[upper].size.height,
+                        lower_height: bounds[lower].size.height,
+                    });
+                }),
+            )
+    }
+
+    fn resize_sections(&mut self, y: Pixels, cx: &mut Context<Self>) {
+        let Some(drag) = self.sash_drag else {
+            return;
+        };
+        let min = px(SECTION_MIN_HEIGHT);
+        let total = drag.upper_height + drag.lower_height;
+        if total < min * 2. {
+            return;
+        }
+        let upper = (drag.upper_height + (y - drag.start_y)).clamp(min, total - min);
+        self.section_weights[drag.upper] = f32::from(upper);
+        self.section_weights[drag.lower] = f32::from(total - upper);
+        cx.notify();
+    }
+
+    fn refresh_worktrees(&mut self, cx: &mut Context<Self>) {
+        let Some(repo) = self.active_repository.clone() else {
+            self.worktrees.clear();
+            return;
+        };
+        let receiver = repo.update(cx, |repo, _| repo.worktrees());
+        self.worktrees_task = cx.spawn(async move |this, cx| {
+            let worktrees = receiver
+                .await
+                .ok()
+                .and_then(|result| result.ok())
+                .unwrap_or_default();
+            this.update(cx, |this, cx| {
+                if this.worktrees != worktrees {
+                    this.worktrees = worktrees;
+                    cx.notify();
+                }
+            })
+            .ok();
+        });
+    }
+
+    fn render_worktrees_section(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let repo = self.active_repository.clone()?;
+        let current_path = repo.read(cx).work_directory_abs_path.clone();
+        let collapsed = self.worktrees_collapsed;
+        let colors = cx.theme().colors();
+        let hover_bg = colors.ghost_element_hover;
+        let border_variant = colors.border_variant;
+
+        let header = h_flex()
+            .id("worktrees-header")
+            .h(self.list_item_height())
+            .w_full()
+            .pl_2p5()
+            .pr_2()
+            .gap_1()
+            .cursor_pointer()
+            .hover(|style| style.bg(hover_bg))
+            .child(
+                Icon::new(if collapsed {
+                    IconName::ChevronRight
+                } else {
+                    IconName::ChevronDown
+                })
+                .size(IconSize::XSmall)
+                .color(Color::Muted),
+            )
+            .child(
+                Label::new(t!("Worktrees"))
+                    .weight(gpui::FontWeight::BOLD)
+                    .size(LabelSize::Small),
+            )
+            .child(
+                div().relative().top(px(0.75)).child(
+                    Label::new(self.worktrees.len().to_string())
+                        .size(LabelSize::XSmall)
+                        .color(Color::Muted),
+                ),
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.worktrees_collapsed = !this.worktrees_collapsed;
+                cx.notify();
+            }));
+
+        let rows = (!collapsed).then(|| {
+            v_flex()
+                .id("worktree-rows")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .children(self.worktrees.iter().enumerate().map(|(index, worktree)| {
+                    let name: SharedString = worktree.display_name().to_string().into();
+                    let detail: SharedString = if worktree.is_main {
+                        t!("main worktree").into()
+                    } else {
+                        worktree
+                            .path
+                            .file_name()
+                            .map(|name| name.to_string_lossy().to_string())
+                            .unwrap_or_default()
+                            .into()
+                    };
+                    let is_current = worktree.path.as_path() == current_path.as_ref();
+                    let path = worktree.path.clone();
+                    h_flex()
+                        .id(ElementId::Name(format!("worktree_{index}").into()))
+                        .h(self.list_item_height())
+                        .w_full()
+                        .pl_2p5()
+                        .pr_2()
+                        .gap_1p5()
+                        .items_baseline()
+                        .cursor_pointer()
+                        .hover(|style| style.bg(hover_bg))
+                        .child(
+                            div().self_center().child(
+                                Icon::new(IconName::GitWorktree)
+                                    .size(IconSize::Small)
+                                    .color(if is_current {
+                                        Color::Accent
+                                    } else {
+                                        Color::Muted
+                                    }),
+                            ),
+                        )
+                        .child(
+                            Label::new(name)
+                                .size(LabelSize::Small)
+                                .single_line()
+                                .truncate(),
+                        )
+                        .child(
+                            div().min_w_0().flex_1().child(
+                                Label::new(detail)
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted)
+                                    .single_line()
+                                    .truncate(),
+                            ),
+                        )
+                        .when(!is_current, |row| {
+                            row.on_click(move |_, _, cx| {
+                                let path = path.clone();
+                                cx.defer(move |cx| {
+                                    cx.dispatch_action(&crab_actions::OpenWorktreeInNewWindow {
+                                        path,
+                                    });
+                                });
+                            })
+                        })
+                }))
+        });
+
+        Some(
+            self.section_container(SECTION_WORKTREES, cx)
+                .border_t_1()
+                .border_color(border_variant)
+                .child(header)
+                .children(rows)
+                .into_any_element(),
+        )
+    }
+
+    fn render_stashes_section(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let repo = self.active_repository.clone()?;
+        let stash = repo.read(cx).cached_stash();
+        let collapsed = self.stashes_collapsed;
+        let count = stash.entries.len();
+        let colors = cx.theme().colors();
+        let hover_bg = colors.ghost_element_hover;
+        let border_variant = colors.border_variant;
+
+        let header = h_flex()
+            .id("stashes-header")
+            .h(self.list_item_height())
+            .w_full()
+            .pl_2p5()
+            .pr_2()
+            .gap_1()
+            .cursor_pointer()
+            .hover(|style| style.bg(hover_bg))
+            .child(
+                Icon::new(if collapsed {
+                    IconName::ChevronRight
+                } else {
+                    IconName::ChevronDown
+                })
+                .size(IconSize::XSmall)
+                .color(Color::Muted),
+            )
+            .child(
+                Label::new(t!("Stashes"))
+                    .weight(gpui::FontWeight::BOLD)
+                    .size(LabelSize::Small),
+            )
+            .child(
+                div().relative().top(px(0.75)).child(
+                    Label::new(count.to_string())
+                        .size(LabelSize::XSmall)
+                        .color(Color::Muted),
+                ),
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.stashes_collapsed = !this.stashes_collapsed;
+                cx.notify();
+            }));
+
+        let rows = (!collapsed).then(|| {
+            v_flex()
+                .id("stash-rows")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .children(stash.entries.iter().map(|entry| {
+                    let index = entry.index;
+                    let group: SharedString = format!("stash_row_{}", index).into();
+                    let message: SharedString = if entry.message.is_empty() {
+                        format!("stash@{{{}}}", index).into()
+                    } else {
+                        entry.message.clone().into()
+                    };
+                    let branch = entry.branch.clone();
+                    let expanded_files = self.expanded_stashes.get(&entry.oid);
+                    let is_expanded = expanded_files.is_some();
+                    let file_rows: Vec<AnyElement> = match expanded_files {
+                        Some(Some(files)) => {
+                            let stash_oid = entry.oid;
+                            let mut stash_rows = Vec::new();
+                            if GitPanelSettings::get_global(cx).tree_view {
+                                let mut root = HistoryTreeNode {
+                                    first_file: usize::MAX,
+                                    ..Default::default()
+                                };
+                                for (file_index, file) in files.iter().enumerate() {
+                                    let components: Vec<&str> =
+                                        file.path.as_unix_str().split('/').collect();
+                                    let mut node = &mut root;
+                                    for name in &components[..components.len().saturating_sub(1)]
+                                    {
+                                        node =
+                                            node.dirs.entry(name.to_string()).or_insert_with(|| {
+                                                HistoryTreeNode {
+                                                    first_file: usize::MAX,
+                                                    ..Default::default()
+                                                }
+                                            });
+                                        node.first_file = node.first_file.min(file_index);
+                                    }
+                                    node.files.push(file_index);
+                                }
+                                let collapsed = |path: &str| {
+                                    self.collapsed_history_dirs
+                                        .contains(&(stash_oid, path.to_string()))
+                                };
+                                push_history_tree_rows(
+                                    &root,
+                                    index,
+                                    0,
+                                    0,
+                                    "",
+                                    &collapsed,
+                                    &mut stash_rows,
+                                );
+                            } else {
+                                stash_rows.extend((0..files.len()).map(|file| HistoryRow::File {
+                                    commit: index,
+                                    file,
+                                    depth: 0,
+                                }));
+                            }
+                            stash_rows
+                                .into_iter()
+                                .filter_map(|row| match row {
+                                    HistoryRow::File { file, depth, .. } => {
+                                        let history_file = files.get(file)?;
+                                        Some(self.render_stash_file_row(
+                                            index,
+                                            stash_oid,
+                                            file,
+                                            depth,
+                                            history_file,
+                                            cx,
+                                        ))
+                                    }
+                                    HistoryRow::Dir {
+                                        file,
+                                        depth,
+                                        start,
+                                        span,
+                                        ..
+                                    } => {
+                                        let history_file = files.get(file)?;
+                                        Some(self.render_stash_dir_row(
+                                            index,
+                                            stash_oid,
+                                            file,
+                                            history_file,
+                                            depth,
+                                            start,
+                                            span,
+                                            cx,
+                                        ))
+                                    }
+                                    _ => None,
+                                })
+                                .collect()
+                        }
+                        _ => Vec::new(),
+                    };
+                    let stash_oid = entry.oid;
+                    let local_offset =
+                        time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
+                    let relative_time: SharedString =
+                        time::OffsetDateTime::from_unix_timestamp(entry.timestamp)
+                            .map(|dt| {
+                                time_format::format_localized_timestamp(
+                                    dt,
+                                    time::OffsetDateTime::now_utc(),
+                                    local_offset,
+                                    time_format::TimestampFormat::Relative,
+                                )
+                            })
+                            .unwrap_or_default()
+                            .into();
+                    let detail: SharedString = match &branch {
+                        Some(branch) => format!("{branch}, {relative_time}").into(),
+                        None => relative_time,
+                    };
+                    let action_button = |id: &'static str, icon: IconName, tip: SharedString| {
+                        IconButton::new(ElementId::Name(format!("{id}_{index}").into()), icon)
+                            .icon_size(IconSize::Small)
+                            .tooltip(Tooltip::text(tip))
+                    };
+                    let row = h_flex()
+                        .id(ElementId::Name(format!("stash_{}", index).into()))
+                        .group(group.clone())
+                        .h(self.list_item_height())
+                        .w_full()
+                        .pl_2p5()
+                        .pr_1()
+                        .gap_1p5()
+                        .justify_between()
+                        .cursor_pointer()
+                        .hover(|style| style.bg(hover_bg))
+                        .child(
+                            h_flex()
+                                .min_w_0()
+                                .flex_1()
+                                .gap_1()
+                                .items_baseline()
+                                .child(
+                                    div().self_center().child(
+                                        Icon::new(if is_expanded {
+                                            IconName::ChevronDown
+                                        } else {
+                                            IconName::ChevronRight
+                                        })
+                                        .size(IconSize::XSmall)
+                                        .color(Color::Muted),
+                                    ),
+                                )
+                                .child(
+                                    Label::new(message)
+                                        .size(LabelSize::Small)
+                                        .single_line()
+                                        .truncate(),
+                                )
+                                .child(
+                                    div().min_w_0().flex_1().relative().top(px(0.75)).child(
+                                        Label::new(detail)
+                                            .size(LabelSize::XSmall)
+                                            .color(Color::Muted)
+                                            .single_line()
+                                            .truncate(),
+                                    ),
+                                ),
+                        )
+                        .child(
+                            h_flex()
+                                .flex_none()
+                                .gap_0p5()
+                                .invisible()
+                                .group_hover(group, |style| style.visible())
+                                .child(
+                                    action_button(
+                                        "stash_apply",
+                                        IconName::Check,
+                                        t!("Apply Stash"),
+                                    )
+                                    .on_click(cx.listener(
+                                        move |this, _, window, cx| {
+                                            this.stash_entry_op(index, StashOp::Apply, window, cx);
+                                            cx.stop_propagation();
+                                        },
+                                    )),
+                                )
+                                .child(
+                                    action_button("stash_pop", IconName::ArrowUp, t!("Pop Stash"))
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.stash_entry_op(index, StashOp::Pop, window, cx);
+                                            cx.stop_propagation();
+                                        })),
+                                )
+                                .child(
+                                    action_button("stash_drop", IconName::Trash, t!("Drop Stash"))
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.stash_entry_op(index, StashOp::Drop, window, cx);
+                                            cx.stop_propagation();
+                                        })),
+                                ),
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.toggle_stash_expanded(stash_oid, cx);
+                        }));
+                    v_flex().w_full().child(row).children(file_rows)
+                }))
+        });
+
+        Some(
+            self.section_container(SECTION_STASHES, cx)
+                .border_t_1()
+                .border_color(border_variant)
+                .child(header)
+                .children(rows)
+                .into_any_element(),
+        )
+    }
+
+    fn toggle_stash_expanded(&mut self, oid: Oid, cx: &mut Context<Self>) {
+        if self.expanded_stashes.remove(&oid).is_some() {
+            cx.notify();
+            return;
+        }
+        let Some(repository) = self.active_repository.clone() else {
+            return;
+        };
+        self.expanded_stashes.insert(oid, None);
+        let tree_diff = repository.update(cx, |repository, cx| {
+            repository.diff_tree(
+                DiffTreeType::Since {
+                    base: format!("{oid}^").into(),
+                    head: oid.to_string().into(),
+                },
+                cx,
+            )
+        });
+        cx.spawn(async move |this, cx| {
+            let files = match tree_diff.await {
+                Ok(Ok(tree_diff)) => history_files_from_tree_diff(tree_diff),
+                _ => Vec::new(),
+            };
+            this.update(cx, |this, cx| {
+                if let Some(slot) = this.expanded_stashes.get_mut(&oid) {
+                    *slot = Some(files.into());
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn render_stash_dir_row(
+        &self,
+        stash_index: usize,
+        oid: Oid,
+        file_index: usize,
+        file: &HistoryFile,
+        depth: usize,
+        start: usize,
+        span: usize,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let components: Vec<&str> = file.path.as_unix_str().split('/').collect();
+        let end = (start + span).min(components.len());
+        let name: SharedString = components[start..end].join("/").into();
+        let path = components[..end].join("/");
+        let collapsed = self.collapsed_history_dirs.contains(&(oid, path.clone()));
+        let hover_bg = cx.theme().colors().ghost_element_hover;
+        h_flex()
+            .id(ElementId::Name(
+                format!("stash_dir_{}_{}_{}", stash_index, file_index, depth).into(),
+            ))
+            .relative()
+            .children(history_indent_guides(depth, cx))
+            .cursor_pointer()
+            .w_full()
+            .min_w_0()
+            .h(self.list_item_height())
+            .pl(px(HISTORY_CHILD_INDENT) + px(depth as f32 * TREE_INDENT))
+            .pr_1()
+            .gap_1()
+            .hover(|style| style.bg(hover_bg))
+            .child(self.history_folder_indicators(&path, collapsed, cx))
+            .child(
+                div()
+                    .min_w_0()
+                    .child(Label::new(name).size(LabelSize::Small).truncate()),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                let key = (oid, path.clone());
+                if !this.collapsed_history_dirs.remove(&key) {
+                    this.collapsed_history_dirs.insert(key);
+                }
+                cx.notify();
+            }))
+            .into_any_element()
+    }
+
+    fn render_stash_file_row(
+        &self,
+        stash_index: usize,
+        oid: Oid,
+        file_index: usize,
+        tree_depth: usize,
+        file: &HistoryFile,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let tree_view = GitPanelSettings::get_global(cx).tree_view;
+        let file_name: SharedString = file
+            .path
+            .file_name()
+            .map(|name| name.to_string())
+            .unwrap_or_default()
+            .into();
+        let directory: SharedString = if tree_view {
+            SharedString::default()
+        } else {
+            file.path
+                .parent()
+                .map(|parent| parent.as_unix_str().to_string())
+                .unwrap_or_default()
+                .into()
+        };
+        let indent = if tree_view {
+            px(tree_depth as f32 * TREE_INDENT)
+        } else {
+            px(0.)
+        };
+        let (status_letter, status_color) = history_status_style(file.status);
+        let file_icon =
+            self.history_file_icon(file.path.as_unix_str(), file.status, tree_view, cx);
+        let path = file.path.clone();
+        let hover_bg = cx.theme().colors().ghost_element_hover;
+
+        h_flex()
+            .id(ElementId::Name(
+                format!("stash_file_{}_{}", stash_index, file_index).into(),
+            ))
+            .relative()
+            .children(history_indent_guides(tree_depth, cx))
+            .h(self.list_item_height())
+            .w_full()
+            .min_w_0()
+            .pl(px(HISTORY_CHILD_INDENT) + indent)
+            .pr_1()
+            .gap_1()
+            .cursor_pointer()
+            .hover(|style| style.bg(hover_bg))
+            .children(file_icon)
+            .child(
+                div().min_w_0().child(
+                    Label::new(file_name)
+                        .size(LabelSize::Small)
+                        .color(status_color)
+                        .when(file.status == StatusCode::Deleted, Label::strikethrough)
+                        .truncate(),
+                ),
+            )
+            .when(!directory.is_empty(), |this| {
+                this.child(
+                    div().min_w_0().flex_1().child(
+                        Label::new(directory)
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted)
+                            .truncate_start(),
+                    ),
+                )
+            })
+            .child(div().flex_1())
+            .child(
+                div().w_4().flex_none().flex().justify_center().child(
+                    Label::new(status_letter)
+                        .size(LabelSize::Small)
+                        .color(status_color),
+                ),
+            )
+            .on_click(cx.listener(move |this, _, window, cx| {
+                if let Some(repo) = this.active_repository.as_ref() {
+                    CommitView::open(
+                        oid.to_string(),
+                        repo.downgrade(),
+                        this.workspace.clone(),
+                        Some(stash_index),
+                        Some(path.clone()),
+                        window,
+                        cx,
+                    );
+                }
+            }))
+            .into_any_element()
+    }
+
+    fn stash_entry_op(
+        &mut self,
+        index: usize,
+        op: StashOp,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(repo) = self.active_repository.clone() else {
+            return;
+        };
+        let error_title = match op {
+            StashOp::Apply => t!("Failed to apply stash"),
+            StashOp::Pop => t!("Failed to pop stash"),
+            StashOp::Drop => t!("Failed to drop stash"),
+        };
+        cx.spawn(async move |_, cx| {
+            match op {
+                StashOp::Apply => {
+                    repo.update(cx, |repo, cx| repo.stash_apply(Some(index), cx))
+                        .await?
+                }
+                StashOp::Pop => {
+                    repo.update(cx, |repo, cx| repo.stash_pop(Some(index), cx))
+                        .await?
+                }
+                StashOp::Drop => {
+                    repo.update(cx, |repo, cx| repo.stash_drop(Some(index), cx))
+                        .await??
+                }
+            }
+            anyhow::Ok(())
+        })
+        .detach_and_prompt_err(&error_title, window, cx, |e, _, _| Some(e.to_string()));
     }
 
     fn render_empty_section(&self, section: Section) -> AnyElement {
@@ -8513,21 +9874,40 @@ impl GitPanel {
             ElementId::Name(format!("entry_{}_{}_checkbox_wrapper", display_name, ix).into());
         let checkbox_id: ElementId =
             ElementId::Name(format!("entry_{}_{}_checkbox", display_name, ix).into());
+        let open_file_id: ElementId =
+            ElementId::Name(format!("entry_{}_{}_open_file", display_name, ix).into());
+        let discard_id: ElementId =
+            ElementId::Name(format!("entry_{}_{}_discard", display_name, ix).into());
+        let row_group: SharedString = format!("entry_row_{}", ix).into();
+        let (status_letter, status_letter_color) = if has_conflict {
+            ("!", Color::Error)
+        } else if status.is_untracked() {
+            ("U", Color::VersionControlAdded)
+        } else if is_created {
+            ("A", Color::VersionControlAdded)
+        } else if is_deleted {
+            ("D", Color::VersionControlDeleted)
+        } else {
+            ("M", Color::VersionControlModified)
+        };
 
         let stage_status = GitPanel::stage_status_for_entry(entry, &repo);
         let stage_intent = self.stage_intent_for_entry_index(ix);
         let resolved_conflict = self.is_resolved_conflict(ix, cx);
-        let toggle_state = stage_intent.checkbox_state(|| {
-            if self.show_placeholders && !self.has_staged_changes() && !entry.status.is_created() {
-                ToggleState::Selected
-            } else {
-                match stage_status {
-                    StageStatus::Staged => ToggleState::Selected,
-                    StageStatus::Unstaged => ToggleState::Unselected,
-                    StageStatus::PartiallyStaged => ToggleState::Indeterminate,
-                }
-            }
-        });
+        let entry_section = self.section_for_entry_index(ix);
+        let show_discard = entry_section == Some(Section::Unstaged);
+        let active_item = self
+            .workspace
+            .upgrade()
+            .and_then(|workspace| workspace.read(cx).active_item(cx));
+        let is_active_file = active_item
+            .as_ref()
+            .and_then(|item| item.act_as::<SoloDiffView>(cx))
+            .is_some_and(|view| *view.read(cx).repo_path() == entry.repo_path)
+            || active_item
+                .and_then(|item| item.project_path(cx))
+                .and_then(|project_path| repo.project_path_to_repo_path(&project_path, cx))
+                .is_some_and(|active| active == entry.repo_path);
 
         let handle = cx.weak_entity();
 
@@ -8541,6 +9921,7 @@ impl GitPanel {
             (true, true) => info_color.alpha(selected_bg_alpha + marked_bg_alpha),
             (true, false) => info_color.alpha(selected_bg_alpha),
             (false, true) => info_color.alpha(marked_bg_alpha),
+            _ if is_active_file => cx.theme().colors().ghost_element_selected,
             _ => cx.theme().colors().ghost_element_background,
         };
 
@@ -8613,6 +9994,7 @@ impl GitPanel {
 
         h_flex()
             .id(id)
+            .group(row_group.clone())
             .h(self.list_item_height())
             .w_full()
             .pl_2p5()
@@ -8620,6 +10002,7 @@ impl GitPanel {
             .gap_1p5()
             .border_1()
             .border_r_2()
+            .cursor_pointer()
             .when(selected && self.focus_handle.is_focused(window), |el| {
                 el.border_color(cx.theme().colors().panel_focused_border)
             })
@@ -8627,44 +10010,77 @@ impl GitPanel {
             .hover(|s| s.bg(hover_bg))
             .active(|s| s.bg(active_bg))
             .child(name_row)
-            .when(GitPanelSettings::get_global(cx).diff_stats, |el| {
-                el.when_some(entry.diff_stat, move |this, stat| {
-                    let id = format!("diff-stat-{}", id_for_diff_stat);
-                    this.child(ui::DiffStat::new(
-                        id,
-                        stat.added as usize,
-                        stat.deleted as usize,
-                    ))
-                })
-            })
             .child(
-                div()
+                h_flex()
                     .id(checkbox_wrapper_id)
                     .flex_none()
-                    .occlude()
-                    .cursor_pointer()
+                    .gap_1()
                     .child(
-                        Checkbox::new(checkbox_id, toggle_state)
-                            .fill()
-                            .elevation(ElevationIndex::Surface)
-                            .disabled(!has_write_access || resolved_conflict)
-                            .on_click_ext({
-                                let entry = entry.clone();
-                                let this = cx.weak_entity();
-                                move |_, click, window, cx| {
-                                    this.update(cx, |this, cx| {
-                                        if !has_write_access || resolved_conflict {
-                                            return;
-                                        }
-                                        if click.modifiers().shift {
-                                            this.stage_bulk(
-                                                ix,
-                                                stage_intent != StageIntent::Unstage,
+                        h_flex()
+                            .gap_0p5()
+                            .when(!is_active_file, |this| {
+                                this.invisible()
+                                    .group_hover(row_group.clone(), |style| style.visible())
+                            })
+                            .child(
+                                IconButton::new(open_file_id, IconName::GoToFile)
+                                    .icon_size(IconSize::Small)
+                                    .tooltip(Tooltip::text(t!("Open File")))
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.selected_entry = Some(ix);
+                                        this.view_file(&Default::default(), window, cx);
+                                        cx.stop_propagation();
+                                    })),
+                            )
+                            .when(has_write_access && show_discard, |this| {
+                                this.child(
+                                    IconButton::new(discard_id, IconName::Undo)
+                                        .icon_size(IconSize::Small)
+                                        .tooltip(Tooltip::text(if is_created {
+                                            t!("Delete File")
+                                        } else {
+                                            t!("Discard Change")
+                                        }))
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.clear_marks_and_select(ix, cx);
+                                            this.revert_selected(
+                                                &git::RestoreFile::default(),
+                                                window,
                                                 cx,
                                             );
-                                        } else {
-                                            let list_entry =
-                                                if GitPanelSettings::get_global(cx).tree_view {
+                                            cx.stop_propagation();
+                                        })),
+                                )
+                            })
+                            .child(
+                                IconButton::new(
+                                    checkbox_id,
+                                    if stage_intent == StageIntent::Unstage {
+                                        IconName::Dash
+                                    } else {
+                                        IconName::Plus
+                                    },
+                                )
+                                .icon_size(IconSize::Small)
+                                .disabled(!has_write_access || resolved_conflict)
+                                .on_click({
+                                    let entry = entry.clone();
+                                    let this = cx.weak_entity();
+                                    move |click, window, cx| {
+                                        this.update(cx, |this, cx| {
+                                            if !has_write_access || resolved_conflict {
+                                                return;
+                                            }
+                                            if click.modifiers().shift {
+                                                this.stage_bulk(
+                                                    ix,
+                                                    stage_intent != StageIntent::Unstage,
+                                                    cx,
+                                                );
+                                            } else {
+                                                let list_entry = if GitPanelSettings::get_global(cx)
+                                                    .tree_view
+                                                {
                                                     GitListEntry::TreeStatus(GitTreeStatusEntry {
                                                         entry: entry.clone(),
                                                         depth,
@@ -8672,26 +10088,48 @@ impl GitPanel {
                                                 } else {
                                                     GitListEntry::Status(entry.clone())
                                                 };
-                                            this.toggle_staged_for_entry(
-                                                &list_entry,
-                                                stage_intent,
-                                                window,
-                                                cx,
-                                            );
-                                        }
-                                        cx.stop_propagation();
-                                    })
-                                    .ok();
-                                }
-                            })
-                            .tooltip(move |_window, cx| {
-                                if resolved_conflict {
-                                    Tooltip::simple(t!("Conflict marked as resolved"), cx)
-                                } else {
-                                    let action = stage_intent.label(|| stage_status);
-                                    Tooltip::for_action(action, &ToggleStaged, cx)
-                                }
-                            }),
+                                                this.toggle_staged_for_entry(
+                                                    &list_entry,
+                                                    stage_intent,
+                                                    window,
+                                                    cx,
+                                                );
+                                            }
+                                            cx.stop_propagation();
+                                        })
+                                        .ok();
+                                    }
+                                })
+                                .tooltip(move |_window, cx| {
+                                    if resolved_conflict {
+                                        Tooltip::simple(t!("Conflict marked as resolved"), cx)
+                                    } else if stage_intent == StageIntent::Unstage {
+                                        Tooltip::simple(t!("Unstash Change"), cx)
+                                    } else if stage_intent == StageIntent::Stage {
+                                        Tooltip::simple(t!("Stage Changes"), cx)
+                                    } else {
+                                        let action = stage_intent.label(|| stage_status);
+                                        Tooltip::for_action(action, &ToggleStaged, cx)
+                                    }
+                                }),
+                            ),
+                    )
+                    .when(GitPanelSettings::get_global(cx).diff_stats, |el| {
+                        el.when_some(entry.diff_stat, move |this, stat| {
+                            let id = format!("diff-stat-{}", id_for_diff_stat);
+                            this.child(ui::DiffStat::new(
+                                id,
+                                stat.added as usize,
+                                stat.deleted as usize,
+                            ))
+                        })
+                    })
+                    .child(
+                        div().w_4().flex_none().flex().justify_center().child(
+                            Label::new(status_letter)
+                                .size(LabelSize::Small)
+                                .color(status_letter_color),
+                        ),
                     ),
             )
             .on_click({
@@ -8746,6 +10184,9 @@ impl GitPanel {
             ElementId::Name(format!("dir_checkbox_{}_{}", entry.name, ix).into());
         let checkbox_wrapper_id: ElementId =
             ElementId::Name(format!("dir_checkbox_wrapper_{}_{}", entry.name, ix).into());
+        let discard_id: ElementId =
+            ElementId::Name(format!("dir_discard_{}_{}", entry.name, ix).into());
+        let row_group: SharedString = format!("dir_row_{}", ix).into();
 
         let selected_bg_alpha = 0.08;
         let marked_bg_alpha = 0.12;
@@ -8800,12 +10241,6 @@ impl GitPanel {
 
         let stage_intent = StageIntent::for_section(entry.key.section);
         let resolved_conflict = self.is_resolved_conflict(ix, cx);
-        let toggle_state = stage_intent.checkbox_state(|| match stage_status {
-            StageStatus::Staged => ToggleState::Selected,
-            StageStatus::Unstaged => ToggleState::Unselected,
-            StageStatus::PartiallyStaged => ToggleState::Indeterminate,
-        });
-
         let name_row = h_flex()
             .min_w_0()
             .gap_1()
@@ -8838,6 +10273,7 @@ impl GitPanel {
 
         h_flex()
             .id(id)
+            .group(row_group.clone())
             .h(self.list_item_height())
             .min_w_0()
             .w_full()
@@ -8847,6 +10283,7 @@ impl GitPanel {
             .justify_between()
             .border_1()
             .border_r_2()
+            .cursor_pointer()
             .when(selected && self.focus_handle.is_focused(window), |el| {
                 el.border_color(cx.theme().colors().panel_focused_border)
             })
@@ -8855,47 +10292,66 @@ impl GitPanel {
             .active(|s| s.bg(active_bg))
             .child(name_row)
             .child(
-                div()
+                h_flex()
                     .id(checkbox_wrapper_id)
                     .flex_none()
-                    .occlude()
-                    .cursor_pointer()
-                    .child(
-                        Checkbox::new(checkbox_id, toggle_state)
-                            .disabled(!has_write_access || resolved_conflict)
-                            .fill()
-                            .elevation(ElevationIndex::Surface)
-                            .on_click({
-                                let entry = entry.clone();
-                                let this = cx.weak_entity();
-                                move |_, window, cx| {
-                                    this.update(cx, |this, cx| {
-                                        if !has_write_access || resolved_conflict {
-                                            return;
-                                        }
-                                        this.toggle_staged_for_entry(
-                                            &GitListEntry::Directory(entry.clone()),
-                                            stage_intent,
-                                            window,
-                                            cx,
-                                        );
+                    .gap_0p5()
+                    .invisible()
+                    .group_hover(row_group.clone(), |style| style.visible())
+                    .when(has_write_access && stage_intent == StageIntent::Stage, |this| {
+                        this.child(
+                            IconButton::new(discard_id, IconName::Undo)
+                                .icon_size(IconSize::Small)
+                                .tooltip(Tooltip::text(t!("Discard Changes")))
+                                .on_click({
+                                    let key = entry.key.clone();
+                                    cx.listener(move |this, _, window, cx| {
+                                        let entries = this.directory_status_entries(&key);
+                                        this.revert_entries(entries, false, window, cx);
                                         cx.stop_propagation();
                                     })
-                                    .ok();
-                                }
-                            })
-                            .tooltip(move |_window, cx| {
-                                if resolved_conflict {
-                                    Tooltip::simple(t!("Conflicts marked as resolved"), cx)
-                                } else {
-                                    let label = if stage_intent.resolve_with(|| stage_status) {
-                                        t!("Stage Folder")
-                                    } else {
-                                        t!("Unstage Folder")
-                                    };
-                                    Tooltip::simple(label, cx)
-                                }
-                            }),
+                                }),
+                        )
+                    })
+                    .child(
+                        IconButton::new(
+                            checkbox_id,
+                            if stage_intent == StageIntent::Unstage {
+                                IconName::Dash
+                            } else {
+                                IconName::Plus
+                            },
+                        )
+                        .icon_size(IconSize::Small)
+                        .disabled(!has_write_access || resolved_conflict)
+                        .on_click({
+                            let entry = entry.clone();
+                            let this = cx.weak_entity();
+                            move |_, window, cx| {
+                                this.update(cx, |this, cx| {
+                                    if !has_write_access || resolved_conflict {
+                                        return;
+                                    }
+                                    this.toggle_staged_for_entry(
+                                        &GitListEntry::Directory(entry.clone()),
+                                        stage_intent,
+                                        window,
+                                        cx,
+                                    );
+                                    cx.stop_propagation();
+                                })
+                                .ok();
+                            }
+                        })
+                        .tooltip(move |_window, cx| {
+                            if resolved_conflict {
+                                Tooltip::simple(t!("Conflicts marked as resolved"), cx)
+                            } else if stage_intent.resolve_with(|| stage_status) {
+                                Tooltip::simple(t!("Stage Folder"), cx)
+                            } else {
+                                Tooltip::simple(t!("Unstage Folder"), cx)
+                            }
+                        }),
                     ),
             )
             .on_click({
@@ -9177,7 +10633,6 @@ impl Render for GitPanel {
                     .on_action(cx.listener(GitPanel::on_commit))
                     .on_action(cx.listener(GitPanel::toggle_skip_hooks))
                     .on_action(cx.listener(GitPanel::on_amend))
-                    .on_action(cx.listener(Self::generate_commit_message_action))
                     .on_action(cx.listener(GitPanel::toggle_signoff_enabled))
                     .on_action(cx.listener(Self::stage_all))
                     .on_action(cx.listener(Self::unstage_all))
@@ -9228,19 +10683,27 @@ impl Render for GitPanel {
             .on_action(cx.listener(Self::reset_font_size))
             .on_action(cx.listener(Self::activate_changes_tab))
             .on_action(cx.listener(Self::activate_history_tab))
+            .on_drag_move(cx.listener(
+                |this, event: &DragMoveEvent<DraggedSash>, _, cx| {
+                    this.resize_sections(event.event.position.y, cx);
+                },
+            ))
             .size_full()
             .overflow_hidden()
             .bg(cx.theme().colors().panel_background)
             .child(
                 v_flex()
                     .size_full()
-                    .when(!self.commit_editor_expanded, |this| {
-                        this.child(self.render_tab_bar(cx))
-                    })
-                    .map(|this| match self.active_tab {
-                        GitPanelTab::Changes => this
+                    .map(|this| {
+                        let changes_section = self
+                            .section_container(SECTION_CHANGES, cx)
                             .children(self.render_changes_header(window, cx))
-                            .when(!self.commit_editor_expanded, |this| {
+                            .when(!self.changes_collapsed, |this| {
+                                this.children(self.render_footer(window, cx))
+                            })
+                            .when(
+                                !self.commit_editor_expanded && !self.changes_collapsed,
+                                |this| {
                                 this.map(|this| {
                                     if let Some(repo) = self.active_repository.clone()
                                         && has_entries
@@ -9255,15 +10718,20 @@ impl Render for GitPanel {
                                         this.child(self.render_empty_state(cx).into_any_element())
                                     }
                                 })
+                            });
+                        this
+                            .child(changes_section)
+                            .when(!self.commit_editor_expanded, |this| {
+                                this.children(self.render_commits_section(window, cx))
                             })
-                            .children(self.render_footer(window, cx))
+                            .children(self.render_stashes_section(cx))
+                            .children(self.render_worktrees_section(cx))
                             .when(self.amend_pending, |this| {
                                 this.child(self.render_pending_amend(cx))
                             })
                             .when(!self.amend_pending, |this| {
                                 this.children(self.render_previous_commit(window, cx))
-                            }),
-                        GitPanelTab::History => this.child(self.render_history_tab(window, cx)),
+                            })
                     })
                     .into_any_element(),
             )
@@ -9400,7 +10868,7 @@ pub(crate) fn git_commit_editor_style(font_size: gpui::Pixels, cx: &App) -> Edit
     let settings = ThemeSettings::get_global(cx);
 
     EditorStyle {
-        background: cx.theme().colors().editor_background,
+        background: gpui::transparent_black(),
         local_player: cx.theme().players().local(),
         text: TextStyle {
             color: cx.theme().colors().text,
@@ -9941,6 +11409,13 @@ mod tests {
         cx.update(|cx| {
             let settings_store = SettingsStore::test(cx);
             cx.set_global(settings_store);
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    let git_panel = settings.git_panel.get_or_insert_default();
+                    git_panel.group_by = Some(GitPanelGroupBy::Status);
+                    git_panel.tree_view = Some(false);
+                })
+            });
             theme_settings::init(LoadThemes::JustBase, cx);
             editor::init(cx);
             crate::init(cx);
@@ -10654,8 +12129,8 @@ mod tests {
                 rows(panel),
                 [
                     HistoryRow::Commit(0),
-                    HistoryRow::File { commit: 0, file: 0 },
-                    HistoryRow::File { commit: 0, file: 1 },
+                    HistoryRow::File { commit: 0, file: 0, depth: 0 },
+                    HistoryRow::File { commit: 0, file: 1, depth: 0 },
                     HistoryRow::Commit(1)
                 ]
             );
@@ -10670,8 +12145,8 @@ mod tests {
                 rows(panel),
                 [
                     HistoryRow::Commit(0),
-                    HistoryRow::File { commit: 0, file: 0 },
-                    HistoryRow::File { commit: 0, file: 1 },
+                    HistoryRow::File { commit: 0, file: 0, depth: 0 },
+                    HistoryRow::File { commit: 0, file: 1, depth: 0 },
                     HistoryRow::Commit(1)
                 ]
             );
@@ -11302,10 +12777,6 @@ mod tests {
                         ..
                     }),
                     Header(GitHeaderEntry {
-                        header: Section::Staged
-                    }),
-                    EmptySection(Section::Staged),
-                    Header(GitHeaderEntry {
                         header: Section::Unstaged
                     }),
                     EmptySection(Section::Unstaged),
@@ -11335,10 +12806,6 @@ mod tests {
                         status: FileStatus::Unmerged(..),
                         ..
                     }),
-                    Header(GitHeaderEntry {
-                        header: Section::Staged
-                    }),
-                    EmptySection(Section::Staged),
                     Header(GitHeaderEntry {
                         header: Section::Unstaged
                     }),

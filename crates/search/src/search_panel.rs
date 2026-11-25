@@ -29,7 +29,7 @@ use project::{Project, ProjectPath, search::SearchQuery};
 use settings::{DockSide, IntoGpui, RegisterSetting, Settings, SettingsStore};
 use std::{ops::Range, sync::Arc, time::Duration};
 use text::ToPoint as _;
-use ui::{Icon, IconButton, IconButtonShape, IconName, Label, ListItem, Tooltip, prelude::*};
+use ui::{Disclosure, Icon, IconButton, IconButtonShape, IconName, Label, ListItem, Tooltip, prelude::*};
 use util::paths::{PathMatcher, PathStyle};
 use workspace::{
     DeploySearch, HideStatusItem, Workspace,
@@ -52,6 +52,12 @@ actions!(
         CollapseAllEntries,
         /// Expands every file in the results.
         ExpandAllEntries,
+        /// Shows the results grouped in a folder tree.
+        ViewAsTree,
+        /// Shows the results as a flat list of files.
+        ViewAsList,
+        /// Removes the selected folder, file or match from the results.
+        DismissSelectedEntry,
         /// Collapses the selected file.
         CollapseSelectedEntry,
         /// Expands the selected file.
@@ -64,6 +70,8 @@ const SEARCH_ON_TYPE_DEBOUNCE: Duration = Duration::from_millis(250);
 const LEFT_CONTEXT_CHARS: usize = 24;
 const RIGHT_CONTEXT_CHARS: usize = 160;
 const INDENT_STEP: Pixels = px(22.);
+const TREE_INDENT: Pixels = px(16.);
+const INDENT_GUIDE_LEFT_OFFSET: Pixels = px(15.);
 
 #[derive(Debug, Clone, Copy, PartialEq, RegisterSetting)]
 pub struct SearchPanelSettings {
@@ -111,6 +119,11 @@ pub struct SearchPanel {
     files: Vec<FileResult>,
     entries: Vec<Entry>,
     collapsed_files: HashSet<BufferId>,
+    dismissed: Vec<Range<Anchor>>,
+    view_as_tree: bool,
+    dirs: Vec<DirNode>,
+    file_depths: Vec<usize>,
+    collapsed_dirs: HashSet<String>,
     selected_entry: Option<Entry>,
     scroll_handle: UniformListScrollHandle,
     debounced_search: Option<Task<()>>,
@@ -128,8 +141,15 @@ struct FileResult {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Entry {
+    Dir(usize),
     File(usize),
     Match { file: usize, index: usize },
+}
+
+struct DirNode {
+    key: String,
+    name: SharedString,
+    depth: usize,
 }
 
 struct MatchLine {
@@ -157,17 +177,17 @@ impl SearchPanel {
         cx.new(|cx| {
             let search =
                 cx.new(|cx| ProjectSearch::new(project.clone(), weak_workspace.clone(), cx));
-            let query_editor = single_line_editor(&t!("Search"), window, cx);
+            let query_editor = wrapping_editor(&t!("Search"), window, cx);
             query_editor.update(cx, |editor, _| {
                 editor.set_use_autoclose(false);
                 editor.set_use_selection_highlight(false);
             });
             let replacement_editor =
-                single_line_editor(&i18n::translate(REPLACE_PLACEHOLDER), window, cx);
+                wrapping_editor(&i18n::translate(REPLACE_PLACEHOLDER), window, cx);
             let included_files_editor =
-                single_line_editor(&i18n::translate(INCLUDE_PLACEHOLDER), window, cx);
+                wrapping_editor(&i18n::translate(INCLUDE_PLACEHOLDER), window, cx);
             let excluded_files_editor =
-                single_line_editor(&i18n::translate(EXCLUDE_PLACEHOLDER), window, cx);
+                wrapping_editor(&i18n::translate(EXCLUDE_PLACEHOLDER), window, cx);
 
             let subscriptions = vec![
                 cx.observe_in(&search, window, |this: &mut Self, _, window, cx| {
@@ -213,6 +233,11 @@ impl SearchPanel {
                 files: Vec::new(),
                 entries: Vec::new(),
                 collapsed_files: HashSet::default(),
+                dismissed: Vec::new(),
+                view_as_tree: false,
+                dirs: Vec::new(),
+                file_depths: Vec::new(),
+                collapsed_dirs: HashSet::default(),
                 selected_entry: None,
                 scroll_handle: UniformListScrollHandle::new(),
                 debounced_search: None,
@@ -335,6 +360,7 @@ impl SearchPanel {
 
     fn search(&mut self, mode: SearchMode, cx: &mut Context<Self>) {
         self.debounced_search = None;
+        self.dismissed.clear();
         self.clear_match_highlights(cx);
         if self.query_text(cx).is_empty() {
             self.error = None;
@@ -396,6 +422,9 @@ impl SearchPanel {
         let mut files: Vec<FileResult> = Vec::new();
         let mut file_indices: HashMap<BufferId, usize> = HashMap::default();
         for range in &search.match_ranges {
+            if self.dismissed.contains(range) {
+                continue;
+            }
             let Some(buffer_id) = range.start.buffer_id() else {
                 continue;
             };
@@ -446,7 +475,59 @@ impl SearchPanel {
 
     fn rebuild_entries(&mut self) {
         let mut entries = Vec::new();
-        for (file_index, file) in self.files.iter().enumerate() {
+        let mut dirs = Vec::new();
+        let mut file_depths = vec![0; self.files.len()];
+        let mut order: Vec<usize> = (0..self.files.len()).collect();
+        if self.view_as_tree {
+            order.sort_by(|a, b| {
+                self.files[*a]
+                    .directory
+                    .cmp(&self.files[*b].directory)
+                    .then_with(|| self.files[*a].file_name.cmp(&self.files[*b].file_name))
+            });
+        }
+        let mut stack: Vec<String> = Vec::new();
+        for file_index in order {
+            let file = &self.files[file_index];
+            let mut hidden = false;
+            if self.view_as_tree {
+                let components: Vec<&str> = file
+                    .directory
+                    .split(['/', '\\'])
+                    .filter(|component| !component.is_empty())
+                    .collect();
+                let common = stack
+                    .iter()
+                    .zip(&components)
+                    .take_while(|(a, b)| a.as_str() == **b)
+                    .count();
+                stack.truncate(common);
+                let mut key = String::new();
+                for (depth, component) in components.iter().enumerate() {
+                    if !key.is_empty() {
+                        key.push('/');
+                    }
+                    key.push_str(component);
+                    if depth >= common {
+                        if !hidden {
+                            dirs.push(DirNode {
+                                key: key.clone(),
+                                name: SharedString::from(component.to_string()),
+                                depth,
+                            });
+                            entries.push(Entry::Dir(dirs.len() - 1));
+                        }
+                        stack.push(component.to_string());
+                    }
+                    if self.collapsed_dirs.contains(&key) {
+                        hidden = true;
+                    }
+                }
+                file_depths[file_index] = components.len();
+            }
+            if hidden {
+                continue;
+            }
             entries.push(Entry::File(file_index));
             if !self.collapsed_files.contains(&file.buffer_id) {
                 entries.extend((0..file.matches.len()).map(|index| Entry::Match {
@@ -455,6 +536,8 @@ impl SearchPanel {
                 }));
             }
         }
+        self.dirs = dirs;
+        self.file_depths = file_depths;
         self.entries = entries;
         if let Some(selected) = self.selected_entry
             && !self.entries.contains(&selected)
@@ -535,6 +618,7 @@ impl SearchPanel {
     fn confirm(&mut self, _: &Confirm, window: &mut Window, cx: &mut Context<Self>) {
         if self.focus_handle.is_focused(window) {
             match self.selected_entry {
+                Some(Entry::Dir(dir)) => self.toggle_dir(dir, cx),
                 Some(Entry::File(file)) => self.toggle_file(file, cx),
                 Some(Entry::Match { file, index }) => {
                     self.open_match(file, index, true, false, window, cx)
@@ -600,6 +684,49 @@ impl SearchPanel {
         cx.notify();
     }
 
+    fn toggle_dir(&mut self, dir_index: usize, cx: &mut Context<Self>) {
+        let Some(dir) = self.dirs.get(dir_index) else {
+            return;
+        };
+        let key = dir.key.clone();
+        if !self.collapsed_dirs.remove(&key) {
+            self.collapsed_dirs.insert(key.clone());
+        }
+        self.rebuild_entries();
+        self.selected_entry = self
+            .dirs
+            .iter()
+            .position(|dir| dir.key == key)
+            .map(Entry::Dir);
+        cx.notify();
+    }
+
+    fn set_dir_collapsed(&mut self, dir_index: usize, collapsed: bool, cx: &mut Context<Self>) {
+        let Some(dir) = self.dirs.get(dir_index) else {
+            return;
+        };
+        if self.collapsed_dirs.contains(&dir.key) != collapsed {
+            self.toggle_dir(dir_index, cx);
+        }
+    }
+
+    fn set_view_as_tree(&mut self, tree: bool, cx: &mut Context<Self>) {
+        if self.view_as_tree != tree {
+            self.view_as_tree = tree;
+            self.selected_entry = None;
+            self.rebuild_entries();
+            cx.notify();
+        }
+    }
+
+    fn view_as_tree(&mut self, _: &ViewAsTree, _: &mut Window, cx: &mut Context<Self>) {
+        self.set_view_as_tree(true, cx);
+    }
+
+    fn view_as_list(&mut self, _: &ViewAsList, _: &mut Window, cx: &mut Context<Self>) {
+        self.set_view_as_tree(false, cx);
+    }
+
     fn set_file_collapsed(&mut self, file_index: usize, collapsed: bool, cx: &mut Context<Self>) {
         let Some(file) = self.files.get(file_index) else {
             return;
@@ -621,6 +748,7 @@ impl SearchPanel {
         cx: &mut Context<Self>,
     ) {
         match self.selected_entry {
+            Some(Entry::Dir(dir)) => self.set_dir_collapsed(dir, true, cx),
             Some(Entry::File(file)) => self.set_file_collapsed(file, true, cx),
             Some(Entry::Match { file, .. }) => {
                 self.selected_entry = Some(Entry::File(file));
@@ -636,8 +764,10 @@ impl SearchPanel {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(Entry::File(file)) = self.selected_entry {
-            self.set_file_collapsed(file, false, cx);
+        match self.selected_entry {
+            Some(Entry::Dir(dir)) => self.set_dir_collapsed(dir, false, cx),
+            Some(Entry::File(file)) => self.set_file_collapsed(file, false, cx),
+            _ => {}
         }
     }
 
@@ -649,12 +779,17 @@ impl SearchPanel {
     ) {
         self.collapsed_files
             .extend(self.files.iter().map(|file| file.buffer_id));
+        if self.view_as_tree {
+            let keys: Vec<String> = self.dirs.iter().map(|dir| dir.key.clone()).collect();
+            self.collapsed_dirs.extend(keys);
+        }
         self.rebuild_entries();
         cx.notify();
     }
 
     fn expand_all_entries(&mut self, _: &ExpandAllEntries, _: &mut Window, cx: &mut Context<Self>) {
         self.collapsed_files.clear();
+        self.collapsed_dirs.clear();
         self.rebuild_entries();
         cx.notify();
     }
@@ -729,7 +864,7 @@ impl SearchPanel {
         match self.selected_entry {
             Some(Entry::Match { file, index }) => self.replace_match(file, index, window, cx),
             Some(Entry::File(file)) => self.replace_file(file, window, cx),
-            None => {}
+            Some(Entry::Dir(_)) | None => {}
         }
     }
 
@@ -749,6 +884,70 @@ impl SearchPanel {
             return;
         };
         self.replace_matches(vec![range], window, cx);
+    }
+
+    fn dismiss_match(&mut self, file_index: usize, match_index: usize, cx: &mut Context<Self>) {
+        let Some(range) = self
+            .files
+            .get(file_index)
+            .and_then(|file| file.matches.get(match_index))
+            .cloned()
+        else {
+            return;
+        };
+        self.dismissed.push(range);
+        self.selected_entry = None;
+        self.rebuild_results(cx);
+        cx.notify();
+    }
+
+    fn dismiss_dir(&mut self, dir_index: usize, cx: &mut Context<Self>) {
+        let Some(key) = self.dirs.get(dir_index).map(|dir| dir.key.clone()) else {
+            return;
+        };
+        let prefix = format!("{key}/");
+        let ranges: Vec<Range<Anchor>> = self
+            .files
+            .iter()
+            .filter(|file| {
+                let components: Vec<&str> = file
+                    .directory
+                    .split(['/', '\\'])
+                    .filter(|component| !component.is_empty())
+                    .collect();
+                let file_key = components.join("/");
+                file_key == key || file_key.starts_with(&prefix)
+            })
+            .flat_map(|file| file.matches.iter().cloned())
+            .collect();
+        self.dismissed.extend(ranges);
+        self.selected_entry = None;
+        self.rebuild_results(cx);
+        cx.notify();
+    }
+
+    fn dismiss_selected_entry(
+        &mut self,
+        _: &DismissSelectedEntry,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match self.selected_entry {
+            Some(Entry::Dir(dir)) => self.dismiss_dir(dir, cx),
+            Some(Entry::File(file)) => self.dismiss_file(file, cx),
+            Some(Entry::Match { file, index }) => self.dismiss_match(file, index, cx),
+            None => {}
+        }
+    }
+
+    fn dismiss_file(&mut self, file_index: usize, cx: &mut Context<Self>) {
+        let Some(ranges) = self.files.get(file_index).map(|file| file.matches.clone()) else {
+            return;
+        };
+        self.dismissed.extend(ranges);
+        self.selected_entry = None;
+        self.rebuild_results(cx);
+        cx.notify();
     }
 
     fn replace_file(&mut self, file_index: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -964,11 +1163,15 @@ impl SearchPanel {
                 "search-panel-input-{}",
                 editor.entity_id()
             )))
-            .flex_1()
+            .w_full()
+            .flex_none()
             .min_w_0()
-            .h(px(26.))
+            .min_h(px(26.))
+            .items_start()
+            .overflow_hidden()
             .pl(px(6.))
             .pr_0p5()
+            .py(px(2.))
             .gap_1()
             .border_1()
             .border_color(border_color)
@@ -1193,8 +1396,7 @@ impl SearchPanel {
                              enabled: bool| {
             let focus_handle = query_focus_handle.clone();
             IconButton::new(id, icon)
-                .shape(IconButtonShape::Square)
-                .icon_size(IconSize::Small)
+                .icon_size(IconSize::Medium)
                 .disabled(!enabled)
                 .tooltip(move |_, cx| {
                     Tooltip::for_action_in(i18n::translate(label), action, &focus_handle, cx)
@@ -1203,7 +1405,7 @@ impl SearchPanel {
         };
         let has_results = !self.files.is_empty();
         let title_row = h_flex()
-            .h(px(35.))
+            .h(px(36.))
             .pl(px(12.))
             .pr_1()
             .gap_2()
@@ -1240,6 +1442,23 @@ impl SearchPanel {
                         &CollapseAllEntries,
                         has_results,
                     ))
+                    .child(if self.view_as_tree {
+                        action_button(
+                            "search-panel-view-as-list",
+                            IconName::ListFlat,
+                            n!("View as List"),
+                            &ViewAsList,
+                            true,
+                        )
+                    } else {
+                        action_button(
+                            "search-panel-view-as-tree",
+                            IconName::ListTree,
+                            n!("View as Tree"),
+                            &ViewAsTree,
+                            true,
+                        )
+                    })
                     .child(action_button(
                         "search-panel-open-in-editor",
                         IconName::NewFile,
@@ -1314,17 +1533,38 @@ impl SearchPanel {
                 this.replace_file(file_index, window, cx);
             }))
         });
+        let tree = self.view_as_tree;
         let item = ListItem::new(("search-panel-file", file_index))
-            .toggle(is_expanded)
+            .indent_level(self.file_depths.get(file_index).copied().unwrap_or(0))
+            .indent_step_size(self.indent_step())
+            .always_show_disclosure_icon(true)
+            .toggle(if tree { None } else { Some(is_expanded) })
             .on_toggle(cx.listener(move |this, _, _, cx| this.toggle_file(file_index, cx)))
-            .when_some(icon, |this, icon| this.start_slot(icon))
+            .start_slot(
+                h_flex()
+                    .gap_0p5()
+                    .when(tree, |this| {
+                        this.child(
+                            Disclosure::new(("search-panel-file-disclosure", file_index), is_expanded)
+                                .on_toggle_expanded(Some(Arc::new({
+                                    let weak = cx.weak_entity();
+                                    move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                                        weak.update(cx, |this, cx| this.toggle_file(file_index, cx))
+                                            .ok();
+                                    }
+                                })
+                                    as Arc<dyn Fn(&ClickEvent, &mut Window, &mut App)>)),
+                        )
+                    })
+                    .children(icon),
+            )
             .child(
                 h_flex()
                     .min_w_0()
                     .gap_1p5()
                     .items_baseline()
                     .child(Label::new(file.file_name.clone()).single_line())
-                    .when(!file.directory.is_empty(), |this| {
+                    .when(!tree && !file.directory.is_empty(), |this| {
                         this.child(
                             div().min_w_0().overflow_hidden().child(
                                 Label::new(file.directory.clone())
@@ -1337,22 +1577,114 @@ impl SearchPanel {
                     }),
             )
             .end_slot(
-                h_flex().flex_none().gap_1().children(replace_button).child(
-                    div()
-                        .px_1p5()
-                        .rounded_full()
-                        .bg(colors.element_background)
-                        .child(
-                            Label::new(count.to_string())
-                                .size(LabelSize::XSmall)
-                                .color(Color::Muted),
-                        ),
-                ),
+                div()
+                    .flex_none()
+                    .px_1p5()
+                    .rounded_full()
+                    .bg(colors.element_background)
+                    .child(
+                        Label::new(count.to_string())
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted),
+                    ),
+            )
+            .end_slot_on_hover(
+                h_flex()
+                    .flex_none()
+                    .gap_0p5()
+                    .children(replace_button)
+                    .child(
+                        IconButton::new(("search-panel-dismiss-file", file_index), IconName::Close)
+                            .shape(IconButtonShape::Square)
+                            .icon_size(IconSize::Small)
+                            .tooltip(Tooltip::text(t!("Dismiss")))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.dismiss_file(file_index, cx);
+                            })),
+                    ),
             )
             .on_click(cx.listener(move |this, _, _, cx| this.toggle_file(file_index, cx)));
         Some(self.render_row(
             ("search-panel-file-row", file_index),
             Entry::File(file_index),
+            item,
+            window,
+            cx,
+        ))
+    }
+
+    fn indent_step(&self) -> Pixels {
+        if self.view_as_tree {
+            TREE_INDENT
+        } else {
+            INDENT_STEP
+        }
+    }
+
+    fn entry_depths(&self, range: Range<usize>) -> smallvec::SmallVec<[usize; 64]> {
+        range
+            .map(|ix| match self.entries.get(ix) {
+                Some(Entry::Dir(dir)) => self.dirs.get(*dir).map_or(0, |dir| dir.depth),
+                Some(Entry::File(file)) => self.file_depths.get(*file).copied().unwrap_or(0),
+                Some(Entry::Match { file, .. }) => {
+                    self.file_depths.get(*file).copied().unwrap_or(0) + 1
+                }
+                None => 0,
+            })
+            .collect()
+    }
+
+    fn render_dir(
+        &self,
+        dir_index: usize,
+        window: &Window,
+        cx: &Context<Self>,
+    ) -> Option<AnyElement> {
+        let dir = self.dirs.get(dir_index)?;
+        let is_expanded = !self.collapsed_dirs.contains(&dir.key);
+        let item = ListItem::new(("search-panel-dir", dir_index))
+            .indent_level(dir.depth)
+            .indent_step_size(self.indent_step())
+            .start_slot(
+                h_flex()
+                    .gap_0p5()
+                    .child(
+                        Disclosure::new(("search-panel-dir-disclosure", dir_index), is_expanded)
+                            .on_toggle_expanded(Some(Arc::new({
+                                let weak = cx.weak_entity();
+                                move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                                    weak.update(cx, |this, cx| this.toggle_dir(dir_index, cx))
+                                        .ok();
+                                }
+                            })
+                                as Arc<dyn Fn(&ClickEvent, &mut Window, &mut App)>)),
+                    )
+                    .child(
+                        Icon::new(if is_expanded {
+                            IconName::FolderOpen
+                        } else {
+                            IconName::Folder
+                        })
+                        .color(Color::Muted)
+                        .size(IconSize::Small),
+                    ),
+            )
+            .child(Label::new(dir.name.clone()).single_line())
+            .end_slot_on_hover(
+                IconButton::new(("search-panel-dismiss-dir", dir_index), IconName::Close)
+                    .shape(IconButtonShape::Square)
+                    .icon_size(IconSize::Small)
+                    .tooltip(Tooltip::text(t!("Dismiss")))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.dismiss_dir(dir_index, cx);
+                    })),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| this.toggle_dir(dir_index, cx)));
+        Some(self.render_row(
+            ("search-panel-dir-row", dir_index),
+            Entry::Dir(dir_index),
             item,
             window,
             cx,
@@ -1443,8 +1775,8 @@ impl SearchPanel {
         let item = ListItem::new(SharedString::from(format!(
             "search-panel-match-{file_index}-{match_index}"
         )))
-        .indent_level(1)
-        .indent_step_size(INDENT_STEP)
+        .indent_level(self.file_depths.get(file_index).copied().unwrap_or(0) + 1)
+        .indent_step_size(self.indent_step())
         .child(
             div()
                 .min_w_0()
@@ -1453,9 +1785,27 @@ impl SearchPanel {
                 .text_ellipsis()
                 .child(label),
         )
-        .when_some(replace_button, |this, button| {
-            this.end_slot_on_hover(button)
-        })
+        .end_slot_on_hover(
+            h_flex()
+                .flex_none()
+                .gap_0p5()
+                .children(replace_button)
+                .child(
+                    IconButton::new(
+                        SharedString::from(format!(
+                            "search-panel-dismiss-{file_index}-{match_index}"
+                        )),
+                        IconName::Close,
+                    )
+                    .shape(IconButtonShape::Square)
+                    .icon_size(IconSize::Small)
+                    .tooltip(Tooltip::text(t!("Dismiss")))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.dismiss_match(file_index, match_index, cx);
+                    })),
+                ),
+        )
         .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
             let focus_editor = event.click_count() > 1;
             if !this.focus_handle.is_focused(window) {
@@ -1494,6 +1844,7 @@ impl SearchPanel {
                         .unwrap_or_default()
                         .into_iter()
                         .filter_map(|entry| match entry {
+                            Entry::Dir(dir) => this.render_dir(dir, window, cx),
                             Entry::File(file) => this.render_file(file, window, cx),
                             Entry::Match { file, index } => {
                                 this.render_match(file, index, window, cx)
@@ -1502,15 +1853,25 @@ impl SearchPanel {
                         .collect()
                 }),
             )
+            .when(self.view_as_tree, |list| {
+                list.with_decoration(
+                    ui::indent_guides(TREE_INDENT, ui::IndentGuideColors::panel(cx))
+                        .with_left_offset(INDENT_GUIDE_LEFT_OFFSET)
+                        .with_compute_indents_fn(cx.entity(), |this, range, _window, _cx| {
+                            this.entry_depths(range)
+                        }),
+                )
+            })
             .track_scroll(&self.scroll_handle)
             .size_full(),
         )
     }
 }
 
-fn single_line_editor(placeholder: &str, window: &mut Window, cx: &mut App) -> Entity<Editor> {
+fn wrapping_editor(placeholder: &str, window: &mut Window, cx: &mut App) -> Entity<Editor> {
     cx.new(|cx| {
-        let mut editor = Editor::single_line(window, cx);
+        let mut editor = Editor::auto_height(1, 4, window, cx);
+        editor.set_soft_wrap();
         editor.set_placeholder_text(placeholder, window, cx);
         editor
     })
@@ -1597,8 +1958,11 @@ impl Render for SearchPanel {
             .on_action(cx.listener(Self::select_last))
             .on_action(cx.listener(Self::collapse_selected_entry))
             .on_action(cx.listener(Self::expand_selected_entry))
+            .on_action(cx.listener(Self::dismiss_selected_entry))
             .on_action(cx.listener(Self::collapse_all_entries))
             .on_action(cx.listener(Self::expand_all_entries))
+            .on_action(cx.listener(Self::view_as_tree))
+            .on_action(cx.listener(Self::view_as_list))
             .on_action(cx.listener(Self::clear_results))
             .on_action(cx.listener(Self::refresh_results))
             .on_action(cx.listener(Self::toggle_replace))

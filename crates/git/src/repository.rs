@@ -1055,6 +1055,14 @@ pub trait GitRepository: Send + Sync {
 
     fn create_remote(&self, name: String, url: String) -> BoxFuture<'_, Result<()>>;
 
+    fn create_tag(&self, name: String, message: Option<String>) -> BoxFuture<'_, Result<()>>;
+
+    fn delete_tag(&self, name: String) -> BoxFuture<'_, Result<()>>;
+
+    fn list_tags(&self) -> BoxFuture<'_, Result<Vec<String>>>;
+
+    fn push_tags(&self, remote: String) -> BoxFuture<'_, Result<()>>;
+
     /// returns a list of remote branches that contain HEAD
     fn check_for_pushed_commit(&self) -> BoxFuture<'_, Result<Vec<SharedString>>>;
 
@@ -3072,6 +3080,60 @@ impl GitRepository for RealGitRepository {
         self.executor
             .spawn(async move {
                 git_binary.run(&["remote", "add", &name, &url]).await?;
+                Ok(())
+            })
+            .boxed()
+    }
+
+    fn create_tag(&self, name: String, message: Option<String>) -> BoxFuture<'_, Result<()>> {
+        let git_binary = self.git_binary();
+        self.executor
+            .spawn(async move {
+                match message {
+                    Some(message) if !message.is_empty() => {
+                        git_binary
+                            .run(&["tag", "-a", &name, "-m", &message])
+                            .await?;
+                    }
+                    _ => {
+                        git_binary.run(&["tag", &name]).await?;
+                    }
+                }
+                Ok(())
+            })
+            .boxed()
+    }
+
+    fn delete_tag(&self, name: String) -> BoxFuture<'_, Result<()>> {
+        let git_binary = self.git_binary();
+        self.executor
+            .spawn(async move {
+                git_binary.run(&["tag", "-d", &name]).await?;
+                Ok(())
+            })
+            .boxed()
+    }
+
+    fn list_tags(&self) -> BoxFuture<'_, Result<Vec<String>>> {
+        let git_binary = self.git_binary();
+        self.executor
+            .spawn(async move {
+                let output = git_binary.run(&["tag", "--list", "--sort=-creatordate"]).await?;
+                Ok(output
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty())
+                    .map(str::to_string)
+                    .collect())
+            })
+            .boxed()
+    }
+
+    fn push_tags(&self, remote: String) -> BoxFuture<'_, Result<()>> {
+        let git_binary = self.git_binary();
+        self.executor
+            .spawn(async move {
+                git_binary.run(&["push", &remote, "--tags"]).await?;
                 Ok(())
             })
             .boxed()

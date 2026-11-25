@@ -237,6 +237,8 @@ impl Item for Editor {
         };
         let label_color = if let Some(color) = problem_color {
             color
+        } else if git_color == Color::Conflict {
+            Color::Error
         } else if git_color != neutral_color {
             git_color
         } else if params.selected {

@@ -336,10 +336,9 @@ fn render_conflict_buttons(
         .gap_1()
         .bg(cx.theme().colors().editor_background)
         .child(
-            Button::new(
-                "head",
-                t!("Use {branch}", branch = conflict.ours_branch_name),
-            )
+            Button::new("head", t!("Accept Current Change"))
+            .style(ButtonStyle::Transparent)
+            .color(Color::Muted)
             .label_size(LabelSize::Small)
             .on_click({
                 let editor = editor.clone();
@@ -357,11 +356,11 @@ fn render_conflict_buttons(
                 }
             }),
         )
+        .child(Label::new("|").size(LabelSize::Small).color(Color::Muted))
         .child(
-            Button::new(
-                "origin",
-                t!("Use {branch}", branch = conflict.theirs_branch_name),
-            )
+            Button::new("origin", t!("Accept Incoming Change"))
+            .style(ButtonStyle::Transparent)
+            .color(Color::Muted)
             .label_size(LabelSize::Small)
             .on_click({
                 let editor = editor.clone();
@@ -379,8 +378,11 @@ fn render_conflict_buttons(
                 }
             }),
         )
+        .child(Label::new("|").size(LabelSize::Small).color(Color::Muted))
         .child(
-            Button::new("both", t!("Use Both"))
+            Button::new("both", t!("Accept Both Changes"))
+                .style(ButtonStyle::Transparent)
+                .color(Color::Muted)
                 .label_size(LabelSize::Small)
                 .on_click({
                     let conflict = conflict.clone();

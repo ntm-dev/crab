@@ -30,5 +30,17 @@
   "search_panel::ToggleFocus": {
     "name": "Bật/tắt tiêu điểm",
     "description": "Bật/tắt tiêu điểm của bảng tìm kiếm."
+  },
+  "search_panel::ViewAsList": {
+    "name": "Xem dạng danh sách",
+    "description": "Hiển thị kết quả dưới dạng danh sách tệp phẳng."
+  },
+  "search_panel::DismissSelectedEntry": {
+    "name": "Bỏ qua mục đã chọn",
+    "description": "Xóa thư mục, tệp hoặc kết quả đã chọn khỏi danh sách kết quả."
+  },
+  "search_panel::ViewAsTree": {
+    "name": "Xem dạng cây",
+    "description": "Hiển thị kết quả theo cây thư mục."
   }
 }

@@ -64,6 +64,8 @@
   "Toggle Search Selection": "Bật/tắt tìm trong vùng chọn",
   "Unfold": "Mở rộng",
   "Use Regular Expressions": "Dùng biểu thức chính quy",
+  "View as List": "Xem dạng danh sách",
+  "View as Tree": "Xem dạng cây",
   "files to exclude": "tệp cần loại trừ",
   "files to include": "tệp cần bao gồm",
   "split|Down": "Xuống",

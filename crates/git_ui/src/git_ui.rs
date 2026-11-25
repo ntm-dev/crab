@@ -30,7 +30,7 @@ use crab_actions;
 use crate::{
     commit_view::CommitView,
     git_panel::{GitPanel, GitStatusEntry, RemoteOperationKind},
-    solo_diff_view::SoloDiffView,
+    solo_diff_view::{SoloDiffMode, SoloDiffView},
     text_diff_view::TextDiffView,
 };
 
@@ -46,6 +46,7 @@ pub mod git_graph;
 pub mod git_panel;
 mod git_panel_settings;
 pub mod git_picker;
+mod git_ref_actions;
 mod git_runtime_diagnostics;
 pub mod multi_diff_view;
 pub mod picker_prompt;
@@ -113,6 +114,7 @@ pub fn init(cx: &mut App) {
         git_panel::register(workspace);
         repository_selector::register(workspace);
         git_picker::register(workspace);
+        git_ref_actions::register(workspace);
 
         workspace.register_action(
             |workspace, action: &crab_actions::CreateWorktree, window, cx| {
@@ -380,7 +382,14 @@ fn open_file_diff(
     cx: &mut App,
 ) {
     window.defer(cx, move |window, cx| {
-        SoloDiffView::open_or_focus(entry, repository, workspace.clone(), window, cx)
+        SoloDiffView::open_or_focus(
+            entry,
+            SoloDiffMode::Auto,
+            repository,
+            workspace.clone(),
+            window,
+            cx,
+        )
             .detach_and_notify_err(workspace, window, cx);
     });
 }
@@ -1188,6 +1197,29 @@ pub(crate) fn render_split_button_chevron_trigger(
         .width(chevron_button_size)
         .height(chevron_button_size.into())
         .child(Icon::new(chevron_icon).size(IconSize::XSmall))
+}
+
+pub(crate) fn render_solid_split_button_chevron_trigger(
+    id: impl Into<ElementId>,
+    menu_open: bool,
+) -> ButtonLike {
+    let chevron_icon = if menu_open {
+        IconName::ChevronUp
+    } else {
+        IconName::ChevronDown
+    };
+
+    ButtonLike::new_rounded_right(id)
+        .layer(ElevationIndex::ModalSurface)
+        .style(ButtonStyle::Tinted(TintColor::Solid))
+        .selected_style(ButtonStyle::Tinted(TintColor::Solid))
+        .width(rems_from_px(26_f32))
+        .height(rems_from_px(28_f32).into())
+        .child(
+            Icon::new(chevron_icon)
+                .size(IconSize::XSmall)
+                .color(Color::Custom(gpui::white())),
+        )
 }
 
 /// A visual representation of a file's Git status.

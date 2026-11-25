@@ -1624,6 +1624,39 @@ impl GitRepository for FakeGitRepository {
         })
     }
 
+    fn create_tag(&self, name: String, _message: Option<String>) -> BoxFuture<'_, Result<()>> {
+        self.with_state_async(true, move |state| {
+            let key = format!("refs/tags/{name}");
+            anyhow::ensure!(!state.refs.contains_key(&key), "tag '{name}' already exists");
+            state.refs.insert(key, "HEAD".to_string());
+            Ok(())
+        })
+    }
+
+    fn delete_tag(&self, name: String) -> BoxFuture<'_, Result<()>> {
+        self.with_state_async(true, move |state| {
+            let key = format!("refs/tags/{name}");
+            anyhow::ensure!(state.refs.remove(&key).is_some(), "tag '{name}' not found");
+            Ok(())
+        })
+    }
+
+    fn list_tags(&self) -> BoxFuture<'_, Result<Vec<String>>> {
+        self.with_state_async(false, move |state| {
+            let mut tags: Vec<String> = state
+                .refs
+                .keys()
+                .filter_map(|key| key.strip_prefix("refs/tags/").map(str::to_string))
+                .collect();
+            tags.sort();
+            Ok(tags)
+        })
+    }
+
+    fn push_tags(&self, _remote: String) -> BoxFuture<'_, Result<()>> {
+        async { Ok(()) }.boxed()
+    }
+
     fn remove_remote(&self, name: String) -> BoxFuture<'_, Result<()>> {
         self.with_state_async(true, move |state| {
             state.branches.retain(|branch| {

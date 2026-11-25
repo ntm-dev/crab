@@ -1493,6 +1493,7 @@ impl ProjectSearchView {
 
         let query_editor = cx.new(|cx| {
             let mut editor = Editor::auto_height(1, 4, window, cx);
+            editor.set_soft_wrap();
             editor.set_placeholder_text(&t!("Search all files…"), window, cx);
             editor.set_use_autoclose(false);
             editor.set_use_selection_highlight(false);
@@ -1554,6 +1555,7 @@ impl ProjectSearchView {
         ));
         let replacement_editor = cx.new(|cx| {
             let mut editor = Editor::auto_height(1, 4, window, cx);
+            editor.set_soft_wrap();
             editor.set_placeholder_text(&i18n::translate(REPLACE_PLACEHOLDER), window, cx);
             if let Some(text) = replacement_text {
                 editor.set_text(text, window, cx);
@@ -2561,9 +2563,17 @@ impl ProjectSearchView {
             )
     }
 
-    fn border_color_for(&self, panel: InputPanel, cx: &App) -> Hsla {
+    fn border_color_for(&self, panel: InputPanel, window: &Window, cx: &App) -> Hsla {
+        let editor = match panel {
+            InputPanel::Query => &self.query_editor,
+            InputPanel::Replacement => &self.replacement_editor,
+            InputPanel::Include => &self.included_files_editor,
+            InputPanel::Exclude => &self.excluded_files_editor,
+        };
         if self.panels_with_errors.contains_key(&panel) {
             Color::Error.color(cx)
+        } else if editor.focus_handle(cx).contains_focused(window, cx) {
+            cx.theme().status().info
         } else {
             cx.theme().colors().border
         }
@@ -3059,7 +3069,7 @@ impl Render for ProjectSearchBar {
         let input_width = SearchInputWidth::calc_width(container_width);
 
         let input_base_styles = |panel: InputPanel| {
-            input_base_styles(search.border_color_for(panel, cx), |div| match panel {
+            input_base_styles(search.border_color_for(panel, window, cx), |div| match panel {
                 InputPanel::Query | InputPanel::Replacement => div.w(input_width),
                 InputPanel::Include | InputPanel::Exclude => div.flex_grow_1(),
             })

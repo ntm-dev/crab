@@ -211,12 +211,19 @@ impl Render for BufferSearchBar {
         let in_replace = self.replacement_editor.focus_handle(cx).is_focused(window);
 
         let theme_colors = cx.theme().colors();
+        let focused_border = cx.theme().status().info;
         let query_border = if self.query_error.is_some() {
             Color::Error.color(cx)
+        } else if self.query_editor.focus_handle(cx).contains_focused(window, cx) {
+            focused_border
         } else {
             theme_colors.border
         };
-        let replacement_border = theme_colors.border;
+        let replacement_border = if in_replace {
+            focused_border
+        } else {
+            theme_colors.border
+        };
 
         let container_width = window.viewport_size().width;
         let input_width = SearchInputWidth::calc_width(container_width);
@@ -742,13 +749,18 @@ impl BufferSearchBar {
     ) -> Self {
         let query_editor = cx.new(|cx| {
             let mut editor = Editor::auto_height(1, 4, window, cx);
+            editor.set_soft_wrap();
             editor.set_use_autoclose(false);
             editor.set_use_selection_highlight(false);
             editor
         });
         cx.subscribe_in(&query_editor, window, Self::on_query_editor_event)
             .detach();
-        let replacement_editor = cx.new(|cx| Editor::auto_height(1, 4, window, cx));
+        let replacement_editor = cx.new(|cx| {
+            let mut editor = Editor::auto_height(1, 4, window, cx);
+            editor.set_soft_wrap();
+            editor
+        });
         cx.subscribe(&replacement_editor, Self::on_replacement_editor_event)
             .detach();
 

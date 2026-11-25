@@ -1022,6 +1022,7 @@ pub struct Editor {
     linked_editing_range_task: Option<Task<Option<()>>>,
     linked_edit_ranges: linked_editing_ranges::LinkedEditingRanges,
     pending_rename: Option<RenameState>,
+    git_peek: Option<git::GitPeek>,
     searchable: bool,
     cursor_shape: CursorShape,
     /// Whether the cursor is offset one character to the left when something is
@@ -2352,6 +2353,7 @@ impl Editor {
             document_highlights_task: None,
             linked_editing_range_task: None,
             pending_rename: None,
+            git_peek: None,
             searchable: !is_minimap,
             cursor_shape: EditorSettings::get_global(cx)
                 .cursor_shape
@@ -3371,6 +3373,10 @@ impl Editor {
         self.selection_drag_state = SelectionDragState::None;
 
         if self.dismiss_menus_and_popups(window, cx) {
+            cx.notify();
+            return;
+        }
+        if self.close_git_peek(cx) {
             cx.notify();
             return;
         }

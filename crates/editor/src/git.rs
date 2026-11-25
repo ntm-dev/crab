@@ -1012,12 +1012,6 @@ impl Editor {
             .has_expanded_diff_hunks_in_ranges(&ranges, cx)
     }
 
-    pub(super) fn toggle_single_diff_hunk(&mut self, range: Range<Anchor>, cx: &mut Context<Self>) {
-        self.buffer.update(cx, |buffer, cx| {
-            buffer.toggle_single_diff_hunk(range, cx);
-        })
-    }
-
     pub(super) fn apply_all_diff_hunks(
         &mut self,
         _: &ApplyAllDiffHunks,
@@ -1746,12 +1740,46 @@ pub fn render_diff_hunk_controls(
         .as_ref()
         .is_some_and(|operations| operations.supports_restore());
 
+    let close_range = hunk_range.clone();
+    let all_expanded = editor.read(cx).buffer().read(cx).all_diff_hunks_expanded();
+    let hunk_position = {
+        let snapshot = editor.read(cx).buffer().read(cx).snapshot(cx);
+        let mut total = 0usize;
+        let mut before = 0usize;
+        for other in snapshot.diff_hunks() {
+            total += 1;
+            if other
+                .multi_buffer_range
+                .start
+                .cmp(&hunk_range.start, &snapshot)
+                .is_lt()
+            {
+                before += 1;
+            }
+        }
+        (before + 1, total)
+    };
+
     h_flex()
         .h(line_height)
         .mr_1()
         .gap_1()
         .px_0p5()
         .pb_1()
+        .when(!all_expanded && hunk_position.1 > 0, |el| {
+            el.child(
+                Label::new(
+                    t!(
+                        "{index} of {total} changes",
+                        index = hunk_position.0,
+                        total = hunk_position.1
+                    )
+                    .to_string(),
+                )
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
+            )
+        })
         .border_x_1()
         .border_b_1()
         .border_color(cx.theme().colors().border_variant)
@@ -1924,7 +1952,338 @@ pub fn render_diff_hunk_controls(
                             }
                         }),
                 )
+                .child(
+                    IconButton::new(("close-hunk", row as u64), IconName::Close)
+                        .shape(IconButtonShape::Square)
+                        .icon_size(IconSize::Small)
+                        .tooltip(Tooltip::text(t!("Close")))
+                        .on_click({
+                            let editor = editor.clone();
+                            let close_range = close_range.clone();
+                            move |_event, _window, cx| {
+                                editor.update(cx, |editor, cx| {
+                                    editor.buffer().update(cx, |buffer, cx| {
+                                        buffer.collapse_diff_hunks(vec![close_range.clone()], cx)
+                                    });
+                                });
+                            }
+                        }),
+                )
             },
+        )
+        .into_any_element()
+}
+
+pub(super) struct GitPeek {
+    block_id: CustomBlockId,
+    hunk_start: Anchor,
+}
+
+impl Editor {
+    pub fn close_git_peek(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(peek) = self.git_peek.take() else {
+            return false;
+        };
+        self.remove_blocks(HashSet::from_iter([peek.block_id]), None, cx);
+        true
+    }
+
+    pub fn toggle_git_peek(
+        &mut self,
+        hunk_start: Anchor,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let snapshot = self.buffer.read(cx).snapshot(cx);
+        let row = hunk_start.to_point(&snapshot).row;
+        let same = self
+            .git_peek
+            .as_ref()
+            .is_some_and(|peek| peek.hunk_start.to_point(&snapshot).row == row);
+        if same {
+            self.close_git_peek(cx);
+        } else {
+            self.open_git_peek(hunk_start, window, cx);
+        }
+    }
+
+    pub fn open_git_peek(
+        &mut self,
+        hunk_start: Anchor,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_git_peek(cx);
+        let snapshot = self.buffer.read(cx).snapshot(cx);
+        let row = hunk_start.to_point(&snapshot).row;
+        let hunks: Vec<_> = snapshot.diff_hunks().collect();
+        let total = hunks.len();
+        let Some(index) = hunks.iter().position(|hunk| {
+            let start = hunk.row_range.start.0;
+            let end = hunk.row_range.end.0;
+            start == row || (start <= row && row < end)
+        }) else {
+            return;
+        };
+        let hunk = hunks[index].clone();
+        let multibuffer = self.buffer.read(cx);
+        let Some(buffer) = multibuffer.buffer(hunk.buffer_id) else {
+            return;
+        };
+        let Some(diff) = multibuffer.diff_for(hunk.buffer_id) else {
+            return;
+        };
+        let buffer_range = hunk.buffer_range.to_point(buffer.read(cx));
+        let file_name = buffer
+            .read(cx)
+            .file()
+            .and_then(|file| file.path().file_name())
+            .unwrap_or_default()
+            .to_string();
+        let stage = hunk.status.has_secondary_hunk();
+
+        let peek_multibuffer = cx.new(|cx| {
+            let mut multibuffer = MultiBuffer::without_headers(Capability::ReadOnly);
+            multibuffer.set_excerpts_for_buffer(buffer.clone(), vec![buffer_range], 3, cx);
+            multibuffer.add_diff(diff, cx);
+            multibuffer.set_all_diff_hunks_expanded(cx);
+            multibuffer
+        });
+        let peek_editor = cx.new(|cx| {
+            let mut editor = Editor::new(
+                EditorMode::AutoHeight {
+                    min_lines: 1,
+                    max_lines: None,
+                },
+                peek_multibuffer,
+                None,
+                window,
+                cx,
+            );
+            editor.set_read_only(true);
+            editor.set_show_breakpoints(false, cx);
+            editor.set_show_code_actions(false, cx);
+            editor.set_show_runnables(false, cx);
+            editor.set_show_git_diff_gutter(true, cx);
+            editor.set_show_indent_guides(false, cx);
+            editor.set_diff_hunk_renderer(Some(Arc::new(HiddenUnstagedDiffHunkRenderer)), cx);
+            editor.set_show_gutter(true, cx);
+            editor.set_show_line_numbers(true, cx);
+            editor
+        });
+        let lines = peek_editor.update(cx, |editor, cx| {
+            editor.snapshot(window, cx).max_point().row().0 + 1
+        });
+
+        let target_row = if hunk.row_range.end.0 > hunk.row_range.start.0 {
+            hunk.row_range.end.0 - 1
+        } else {
+            hunk.row_range.start.0
+        };
+        let anchor = snapshot.anchor_before(Point::new(target_row, 0));
+        let title = t!(
+            "Git Local Changes (Working Tree) - {index} of {total} changes",
+            index = index + 1,
+            total = total
+        )
+        .to_string();
+        let editor_handle = cx.entity();
+        let start = hunk.multi_buffer_range.start;
+        let block_id = self.insert_blocks(
+            [BlockProperties {
+                style: BlockStyle::Flex,
+                placement: BlockPlacement::Below(anchor),
+                height: Some(lines + 1),
+                render: Arc::new(move |cx: &mut BlockContext| {
+                    render_git_peek(
+                        &editor_handle,
+                        &peek_editor,
+                        &file_name,
+                        &title,
+                        start,
+                        stage,
+                        cx,
+                    )
+                }),
+                priority: 0,
+            }],
+            Some(Autoscroll::fit()),
+            cx,
+        )[0];
+        self.git_peek = Some(GitPeek {
+            block_id,
+            hunk_start,
+        });
+        cx.notify();
+    }
+
+    fn git_peek_go_to_hunk(
+        &mut self,
+        from: Anchor,
+        direction: Direction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_git_peek(cx);
+        let snapshot = self.snapshot(window, cx);
+        let point = from.to_point(&snapshot.buffer_snapshot());
+        self.go_to_hunk_before_or_after_position(&snapshot, point, direction, true, window, cx);
+        let head = self.selections.newest_anchor().head();
+        self.open_git_peek(head, window, cx);
+    }
+}
+
+fn render_git_peek(
+    editor: &Entity<Editor>,
+    peek_editor: &Entity<Editor>,
+    file_name: &str,
+    title: &str,
+    hunk_start: Anchor,
+    stage: bool,
+    cx: &mut BlockContext,
+) -> AnyElement {
+    let colors = cx.theme().colors();
+    let line_height = cx.line_height;
+    let text_style = cx.editor_style.text.clone();
+    let peek_style = EditorStyle {
+        background: colors.editor_background,
+        local_player: cx.editor_style.local_player,
+        text: text_style,
+        scrollbar_width: cx.editor_style.scrollbar_width,
+        syntax: cx.editor_style.syntax.clone(),
+        status: cx.editor_style.status.clone(),
+        inlay_hints_style: make_inlay_hints_style(cx.app),
+        ..EditorStyle::default()
+    };
+    let button = |id: &'static str, icon: IconName, tooltip: String| {
+        IconButton::new(id, icon)
+            .shape(IconButtonShape::Square)
+            .icon_size(IconSize::Small)
+            .tooltip(Tooltip::text(tooltip))
+    };
+
+    v_flex()
+        .w_full()
+        .block_mouse_except_scroll()
+        .border_y_1()
+        .border_color(colors.border_focused)
+        .bg(colors.editor_background)
+        .child(
+            h_flex()
+                .h(line_height)
+                .pl_2()
+                .pr(cx.margins.right + gpui::px(8.))
+                .gap_2()
+                .justify_between()
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(Label::new(file_name.to_string()).size(LabelSize::Small))
+                        .child(
+                            Label::new(title.to_string())
+                                .size(LabelSize::Small)
+                                .color(Color::Muted),
+                        ),
+                )
+                .child(
+                    h_flex()
+                        .gap_1()
+                        .child(
+                            button(
+                                "git-peek-stage",
+                                if stage { IconName::Plus } else { IconName::Dash },
+                                if stage { t!("Stage Hunk") } else { t!("Unstage Hunk") }
+                                    .to_string(),
+                            )
+                            .on_click({
+                                let editor = editor.clone();
+                                move |_, window, cx| {
+                                    editor.update(cx, |editor, cx| {
+                                        editor.close_git_peek(cx);
+                                        editor.stage_or_unstage_diff_hunks(
+                                            stage,
+                                            vec![hunk_start..hunk_start],
+                                            window,
+                                            cx,
+                                        );
+                                    });
+                                }
+                            }),
+                        )
+                        .child(
+                            button("git-peek-revert", IconName::Undo, t!("Restore Hunk").to_string())
+                                .on_click({
+                                    let editor = editor.clone();
+                                    move |_, window, cx| {
+                                        editor.update(cx, |editor, cx| {
+                                            editor.close_git_peek(cx);
+                                            let snapshot = editor.snapshot(window, cx);
+                                            let point =
+                                                hunk_start.to_point(&snapshot.buffer_snapshot());
+                                            editor.restore_hunks_in_ranges(
+                                                vec![point..point],
+                                                window,
+                                                cx,
+                                            );
+                                        });
+                                    }
+                                }),
+                        )
+                        .child(
+                            button("git-peek-next", IconName::ArrowDown, t!("Next Hunk").to_string())
+                                .on_click({
+                                    let editor = editor.clone();
+                                    move |_, window, cx| {
+                                        editor.update(cx, |editor, cx| {
+                                            editor.git_peek_go_to_hunk(
+                                                hunk_start,
+                                                Direction::Next,
+                                                window,
+                                                cx,
+                                            );
+                                        });
+                                    }
+                                }),
+                        )
+                        .child(
+                            button(
+                                "git-peek-prev",
+                                IconName::ArrowUp,
+                                t!("Previous Hunk").to_string(),
+                            )
+                            .on_click({
+                                let editor = editor.clone();
+                                move |_, window, cx| {
+                                    editor.update(cx, |editor, cx| {
+                                        editor.git_peek_go_to_hunk(
+                                            hunk_start,
+                                            Direction::Prev,
+                                            window,
+                                            cx,
+                                        );
+                                    });
+                                }
+                            }),
+                        )
+                        .child(
+                            button("git-peek-close", IconName::Close, t!("Close").to_string())
+                                .on_click({
+                                    let editor = editor.clone();
+                                    move |_, _, cx| {
+                                        editor.update(cx, |editor, cx| {
+                                            editor.close_git_peek(cx);
+                                        });
+                                    }
+                                }),
+                        ),
+                ),
+        )
+        .child(
+            div()
+                .w_full()
+                .border_t_1()
+                .border_color(colors.border_variant)
+                .child(EditorElement::new(peek_editor, peek_style)),
         )
         .into_any_element()
 }

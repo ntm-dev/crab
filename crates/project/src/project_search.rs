@@ -180,6 +180,7 @@ impl Search {
     /// or full search results.
     pub fn into_handle(mut self, query: SearchQuery, cx: &mut App) -> SearchResultsHandle {
         let mut open_buffers = HashSet::default();
+        let mut open_entry_buffers = Vec::new();
         let mut unnamed_buffers = Vec::new();
         let mut entryless_file_buffers = Vec::new();
         const MAX_CONCURRENT_BUFFER_OPENS: usize = 64;
@@ -196,6 +197,7 @@ impl Search {
                 continue;
             } else if let Some(entry_id) = buffer.entry_id(cx) {
                 open_buffers.insert(entry_id);
+                open_entry_buffers.push(handle.clone());
             } else if searches_all_unnamed_buffers {
                 match (&self.kind, buffer.file()) {
                     (SearchKind::Local { .. }, Some(file)) => {
@@ -225,6 +227,37 @@ impl Search {
                     _ = grab_buffer_snapshot_tx
                         .send((buffer, MatchPositionHint::default()))
                         .await;
+                }
+
+                if matches!(self.kind, SearchKind::Local { .. }) {
+                    let worktree_store = self.worktree_store.clone();
+                    let early_buffers = cx.update(|cx| {
+                        let worktree_store = worktree_store.read(cx);
+                        let mut buffers = open_entry_buffers
+                            .into_iter()
+                            .filter(|buffer| {
+                                let buffer = buffer.read(cx);
+                                let Some(file) = buffer.file() else {
+                                    return false;
+                                };
+                                if !query.match_path(file.path()) {
+                                    return false;
+                                }
+                                query.include_ignored()
+                                    || !buffer
+                                        .entry_id(cx)
+                                        .and_then(|id| worktree_store.entry_for_id(id, cx))
+                                        .is_some_and(|entry| entry.is_ignored)
+                            })
+                            .collect::<Vec<_>>();
+                        buffers.sort_by_cached_key(|buffer| path_key_sort_key(buffer, cx));
+                        buffers
+                    });
+                    for buffer in early_buffers {
+                        _ = grab_buffer_snapshot_tx
+                            .send((buffer, MatchPositionHint::default()))
+                            .await;
+                    }
                 }
 
                 let (find_all_matches_tx, find_all_matches_rx) =
@@ -912,7 +945,7 @@ impl RequestHandler<'_> {
             let InputPath {
                 entry,
                 snapshot,
-                mut should_scan_tx,
+                should_scan_tx,
             } = req;
 
             if entry.is_fifo || !entry.is_file() {
@@ -933,17 +966,7 @@ impl RequestHandler<'_> {
             }
 
             if self.open_entries.contains(&entry.id) {
-                // The buffer is already in memory and that's the version we want to scan;
-                // hence skip the dilly-dally and look for all matches straight away.
-                should_scan_tx
-                    .send((
-                        ProjectPath {
-                            worktree_id: snapshot.id(),
-                            path: entry.path.clone(),
-                        },
-                        MatchPositionHint::default(),
-                    ))
-                    .await?;
+                return Ok(());
             } else {
                 self.confirm_contents_will_match_tx
                     .send(MatchingEntry {

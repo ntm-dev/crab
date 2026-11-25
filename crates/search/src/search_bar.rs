@@ -78,6 +78,7 @@ pub(crate) fn input_base_styles(border_color: Hsla, map: impl FnOnce(Div) -> Div
         .pr_1()
         .border_1()
         .border_color(border_color)
+        .bg(gpui::rgb(0x3c3c3c))
         .rounded_md()
 }
 pub(crate) fn filter_search_results_input(
