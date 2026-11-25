@@ -94,6 +94,13 @@ async fn test_handle_output_event(executor: BackgroundExecutor, cx: &mut TestApp
 
     cx.run_until_parked();
 
+    running_state.update_in(cx, |running_state, window, cx| {
+        running_state
+            .console()
+            .update(cx, |console, cx| console.update_output(window, cx));
+    });
+    cx.run_until_parked();
+
     // assert we have output from before the thread stopped
     workspace
         .update(cx, |workspace, _window, cx| {
@@ -138,8 +145,10 @@ async fn test_handle_output_event(executor: BackgroundExecutor, cx: &mut TestApp
         .await;
 
     cx.run_until_parked();
-    running_state.update(cx, |_, cx| {
-        cx.refresh_windows();
+    running_state.update_in(cx, |running_state, window, cx| {
+        running_state
+            .console()
+            .update(cx, |console, cx| console.update_output(window, cx));
     });
     cx.run_until_parked();
 

@@ -126,7 +126,25 @@ pub(crate) struct SerializedPane {
     pub active_item: Option<DebuggerPaneItem>,
 }
 
-const DEBUGGER_PANEL_PREFIX: &str = "debugger_panel_v4_";
+const DEBUGGER_PANEL_PREFIX: &str = "debugger_panel_";
+
+impl SerializedPaneLayout {
+    fn items(&self) -> Vec<DebuggerPaneItem> {
+        match self {
+            SerializedPaneLayout::Pane(pane) => pane.children.clone(),
+            SerializedPaneLayout::Group { children, .. } => {
+                children.iter().flat_map(Self::items).collect()
+            }
+        }
+    }
+}
+
+impl SerializedLayout {
+    fn is_compatible(&self) -> bool {
+        let items = self.panes.items();
+        items.contains(&DebuggerPaneItem::Watch) && !items.contains(&DebuggerPaneItem::Console)
+    }
+}
 
 pub(crate) async fn serialize_pane_layout(
     adapter_name: DebugAdapterName,
@@ -203,6 +221,7 @@ pub(crate) fn get_serialized_layout(
         .log_err()
         .flatten()
         .and_then(|value| serde_json::from_str::<SerializedLayout>(&value).ok())
+        .filter(SerializedLayout::is_compatible)
 }
 
 pub(crate) fn deserialize_pane_layout(
@@ -279,6 +298,7 @@ pub(crate) fn deserialize_pane_layout(
             let sub_views: Vec<_> = serialized_pane
                 .children
                 .iter()
+                .filter(|child| !matches!(child, DebuggerPaneItem::Console))
                 .map(|child| match child {
                     DebuggerPaneItem::Frames => Box::new(SubView::stack_frame_list(
                         stack_frame_list.clone(),

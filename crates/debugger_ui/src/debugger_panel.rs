@@ -17,7 +17,7 @@ use dap::{DapRegistry, StartDebuggingRequestArguments};
 use dap::{client::SessionId, debugger_settings::DebuggerSettings};
 use editor::Editor;
 use gpui::{
-    Action, Anchor, App, AsyncWindowContext, ClipboardItem, Context, DismissEvent, Entity,
+    Action, Anchor, App, AsyncWindowContext, ClickEvent, ClipboardItem, Context, DismissEvent, Entity,
     EntityId, EventEmitter, FocusHandle, Focusable, MouseButton, MouseDownEvent, Point,
     PromptButton, Subscription, Task, TaskExt, WeakEntity, anchored, deferred,
 };
@@ -56,6 +56,7 @@ const DEBUG_RED: Color = Color::Custom(gpui::hsla(0.028, 0.857, 0.70, 1.0));
 
 pub struct DebugPanel {
     active_session: Option<Entity<DebugSession>>,
+    bottom_log_view: Option<Entity<debugger_tools::DapLogView>>,
     project: Entity<Project>,
     workspace: WeakEntity<Workspace>,
     focus_handle: FocusHandle,
@@ -99,6 +100,7 @@ impl DebugPanel {
             Self {
                 sessions_with_children: Default::default(),
                 active_session: None,
+                bottom_log_view: None,
                 focus_handle,
                 breakpoint_list: BreakpointList::new(
                     None,
@@ -529,7 +531,7 @@ impl DebugPanel {
                 }
             }
             session.update(cx, |session, cx| session.shutdown(cx));
-            this.update(cx, |this, cx| {
+            this.update_in(cx, |this, window, cx| {
                 this.retain_sessions(&|other: &Entity<DebugSession>| {
                     entity_id != other.entity_id()
                 });
@@ -540,6 +542,7 @@ impl DebugPanel {
                     && active_session_id == entity_id
                 {
                     this.active_session = this.sessions_with_children.keys().next().cloned();
+                    this.sync_bottom_debug_views(window, cx);
                 }
                 cx.notify()
             })
@@ -964,12 +967,13 @@ impl DebugPanel {
                 .tooltip(Tooltip::text(t!("Open Documentation")))
         };
 
+        let logs_listener = cx.listener(|this, _: &ClickEvent, window, cx| {
+            this.show_bottom_debug_console(true, window, cx);
+        });
         let logs_button = || {
             IconButton::new("debug-open-logs", IconName::Notepad)
                 .icon_size(IconSize::Small)
-                .on_click(move |_, window, cx| {
-                    window.dispatch_action(debugger_tools::OpenDebugAdapterLogs.boxed_clone(), cx)
-                })
+                .on_click(logs_listener)
                 .tooltip(Tooltip::text(t!("Open Debug Adapter Logs")))
         };
 
@@ -1118,7 +1122,62 @@ impl DebugPanel {
             });
         });
         self.active_session = Some(session_item);
+        self.sync_bottom_debug_views(window, cx);
         cx.notify();
+    }
+
+    pub(crate) fn sync_bottom_debug_views(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let console: Option<gpui::AnyView> = self.active_session.as_ref().map(|session| {
+            session
+                .read(cx)
+                .running_state()
+                .read(cx)
+                .console()
+                .clone()
+                .into()
+        });
+        if console.is_some() && self.bottom_log_view.is_none() {
+            let project = self.project.clone();
+            self.bottom_log_view = debugger_tools::new_log_view(project, window, cx);
+        }
+        if let (Some(log_view), Some(session)) = (self.bottom_log_view.clone(), self.active_session.as_ref()) {
+            let session_id = session.read(cx).session_id(cx);
+            log_view.update(cx, |view, cx| view.show_session(session_id, window, cx));
+        }
+        let logs = console
+            .as_ref()
+            .and(self.bottom_log_view.clone())
+            .map(gpui::AnyView::from);
+        let workspace = self.workspace.clone();
+        window.defer(cx, move |_, cx| {
+            workspace
+                .update(cx, |workspace, cx| {
+                    if let Some(panel) = workspace.panel::<terminal_view::terminal_panel::TerminalPanel>(cx) {
+                        panel.update(cx, |panel, cx| panel.set_debug_views(console, logs, cx));
+                    }
+                })
+                .ok();
+        });
+    }
+
+    pub(crate) fn show_bottom_debug_console(
+        &mut self,
+        logs: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.sync_bottom_debug_views(window, cx);
+        let workspace = self.workspace.clone();
+        window.defer(cx, move |window, cx| {
+            workspace
+                .update(cx, |workspace, cx| {
+                    workspace.focus_panel::<terminal_view::terminal_panel::TerminalPanel>(window, cx);
+                    if let Some(panel) = workspace.panel::<terminal_view::terminal_panel::TerminalPanel>(cx) {
+                        panel.update(cx, |panel, cx| panel.show_debug_console(logs, cx));
+                    }
+                })
+                .ok();
+        });
     }
 
     pub(crate) fn go_to_scenario_definition(

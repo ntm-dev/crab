@@ -41,7 +41,7 @@ enum View {
     InitializationSequence,
 }
 
-struct DapLogView {
+pub struct DapLogView {
     editor: Entity<Editor>,
     focus_handle: FocusHandle,
     log_store: Entity<LogStore>,
@@ -807,6 +807,17 @@ impl DapLogView {
             })
     }
 
+    pub fn show_session(&mut self, session_id: SessionId, window: &mut Window, cx: &mut Context<Self>) {
+        if self.current_view.map(|(id, _)| id) == Some(session_id) {
+            return;
+        }
+        let id = LogStoreEntryIdentifier {
+            session_id,
+            project: Cow::Owned(self.project.downgrade()),
+        };
+        self.show_log_messages_for_adapter(&id, window, cx);
+    }
+
     fn show_rpc_trace_for_server(
         &mut self,
         id: &LogStoreEntryIdentifier<'_>,
@@ -957,8 +968,22 @@ actions!(
     ]
 );
 
+struct GlobalLogStore(Entity<LogStore>);
+
+impl gpui::Global for GlobalLogStore {}
+
+pub fn new_log_view(
+    project: Entity<Project>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Option<Entity<DapLogView>> {
+    let log_store = cx.try_global::<GlobalLogStore>()?.0.clone();
+    Some(cx.new(|cx| DapLogView::new(project, log_store, window, cx)))
+}
+
 pub fn init(cx: &mut App) {
     let log_store = cx.new(|cx| LogStore::new(cx));
+    cx.set_global(GlobalLogStore(log_store.clone()));
 
     cx.observe_new(move |workspace: &mut Workspace, window, cx| {
         let Some(_window) = window else {

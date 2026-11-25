@@ -1730,7 +1730,6 @@ impl RunningState {
         &self.stack_frame_list
     }
 
-    #[cfg(test)]
     pub fn console(&self) -> &Entity<Console> {
         &self.console
     }
@@ -2006,7 +2005,7 @@ impl RunningState {
         stack_frame_list: &Entity<StackFrameList>,
         variable_list: &Entity<VariableList>,
         watch_list: &Entity<VariableList>,
-        console: &Entity<Console>,
+        _console: &Entity<Console>,
         breakpoints: &Entity<BreakpointList>,
         debug_terminal: &Entity<DebugTerminal>,
         dock_axis: Axis,
@@ -2067,17 +2066,6 @@ impl RunningState {
             this.add_item(Box::new(watch_item), true, false, None, window, cx);
         });
 
-        let console_pane = new_debugger_pane(workspace.clone(), project.clone(), window, cx);
-        let console_item = SubView::console(
-            console.clone(),
-            running_state.clone(),
-            console_pane.downgrade(),
-            cx,
-        );
-        console_pane.update(cx, |this, cx| {
-            this.add_item(Box::new(console_item), true, false, None, window, cx);
-        });
-
         let rightmost_pane = new_debugger_pane(workspace.clone(), project, window, cx);
         let rightmost_terminal = SubView::new(
             debug_terminal.focus_handle(cx),
@@ -2097,7 +2085,6 @@ impl RunningState {
                 &breakpoints_pane,
                 &variables_pane,
                 &watch_pane,
-                &console_pane,
                 &rightmost_pane,
             ]
             .into_iter()
@@ -2116,7 +2103,6 @@ impl RunningState {
                 watch_pane,
                 leftmost_pane,
                 breakpoints_pane,
-                console_pane,
                 rightmost_pane,
             ]
             .into_iter()

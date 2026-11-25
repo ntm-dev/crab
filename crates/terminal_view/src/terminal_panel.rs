@@ -11,7 +11,7 @@ use collections::{HashMap, HashSet};
 use db::kvp::KeyValueStore;
 use futures::{channel::oneshot, future::join_all};
 use gpui::{
-    Action, Anchor, App, AsyncApp, AsyncWindowContext, ClickEvent, Context, Entity, EntityId,
+    Action, Anchor, AnyView, App, AsyncApp, AsyncWindowContext, ClickEvent, Context, Entity, EntityId,
     EventEmitter, FocusHandle, Focusable, IntoElement, Modifiers, ParentElement, Pixels, Render,
     Styled, Task, TaskExt, WeakEntity, Window, actions,
 };
@@ -98,6 +98,10 @@ pub struct TerminalPanel {
     maximized_from: Option<Pixels>,
     show_problems: bool,
     problems_view: Option<Entity<diagnostics::ProblemsTable>>,
+    debug_console_view: Option<AnyView>,
+    debug_log_view: Option<AnyView>,
+    show_debug_console: bool,
+    show_debug_logs: bool,
     hidden_tabs: HashSet<PanelTab>,
     show_tab_icons: bool,
 }
@@ -167,6 +171,34 @@ impl TerminalPanel {
             ));
         }
         self.show_problems = true;
+        self.show_debug_console = false;
+        cx.notify();
+    }
+
+    pub fn set_debug_views(
+        &mut self,
+        console: Option<AnyView>,
+        logs: Option<AnyView>,
+        cx: &mut Context<Self>,
+    ) {
+        if console.is_some() {
+            self.hidden_tabs.remove(&PanelTab::DebugConsole);
+        } else {
+            self.show_debug_console = false;
+            self.show_debug_logs = false;
+        }
+        self.debug_console_view = console;
+        self.debug_log_view = logs;
+        cx.notify();
+    }
+
+    pub fn show_debug_console(&mut self, logs: bool, cx: &mut Context<Self>) {
+        if self.debug_console_view.is_none() {
+            return;
+        }
+        self.show_problems = false;
+        self.show_debug_console = true;
+        self.show_debug_logs = logs && self.debug_log_view.is_some();
         cx.notify();
     }
 
@@ -208,6 +240,10 @@ impl TerminalPanel {
             maximized_from: None,
             show_problems: false,
             problems_view: None,
+            debug_console_view: None,
+            debug_log_view: None,
+            show_debug_console: false,
+            show_debug_logs: false,
             hidden_tabs: HashSet::from_iter([
                 PanelTab::Output,
                 PanelTab::Ports,
@@ -2523,6 +2559,8 @@ impl TerminalPanel {
     ) -> impl IntoElement + use<> {
         let maximized = self.maximized_from.is_some();
         let showing_problems = self.show_problems;
+        let showing_debug = self.show_debug_console && self.debug_console_view.is_some();
+        let showing_logs = showing_debug && self.show_debug_logs;
         let show_tab_icons = self.show_tab_icons;
         let tab_content = move |tab: PanelTab| -> AnyElement {
             if show_tab_icons {
@@ -2595,7 +2633,7 @@ impl TerminalPanel {
                             .text_size(ui::scaled_px(13.))
                             .when(hidden_tabs.contains(&PanelTab::Terminal), |tab| tab.hidden())
                             .map(|tab| {
-                                if showing_problems {
+                                if showing_problems || showing_debug {
                                     tab.text_color(colors.text_muted)
                                         .hover(|style| style.text_color(colors.text))
                                 } else {
@@ -2606,6 +2644,7 @@ impl TerminalPanel {
                             })
                             .on_click(cx.listener(|panel, _, _, cx| {
                                 panel.show_problems = false;
+                                panel.show_debug_console = false;
                                 cx.notify();
                             }))
                             .child(tab_content(PanelTab::Terminal)),
@@ -2709,15 +2748,25 @@ impl TerminalPanel {
                             .px(ui::scaled_px(10.))
                             .cursor_pointer()
                             .text_size(ui::scaled_px(13.))
-                            .text_color(colors.text_muted)
-                            .hover(|style| style.text_color(colors.text))
-                            .on_click(|_, window, cx| {
-                                if let Ok(action) =
+                            .map(|tab| {
+                                if showing_debug {
+                                    tab.rounded_t(px(4.))
+                                        .bg(colors.panel_background)
+                                        .text_color(colors.tab_active_foreground)
+                                } else {
+                                    tab.text_color(colors.text_muted)
+                                        .hover(|style| style.text_color(colors.text))
+                                }
+                            })
+                            .on_click(cx.listener(|panel, _, window, cx| {
+                                if panel.debug_console_view.is_some() {
+                                    panel.show_debug_console(false, cx);
+                                } else if let Ok(action) =
                                     cx.build_action("debug_panel::ToggleFocus", None)
                                 {
                                     window.dispatch_action(action, cx);
                                 }
-                            })
+                            }))
                             .child(tab_content(PanelTab::DebugConsole)),
                     ),
             )
@@ -2726,11 +2775,37 @@ impl TerminalPanel {
                     .gap_0p5()
                     .items_center()
                     .children(problems_toolbar)
+                    .when(showing_debug, |this| {
+                        this.child(
+                            h_flex()
+                                .gap_1()
+                                .items_center()
+                                .child(
+                                    Button::new("debug-view-console", t!("Console"))
+                                        .label_size(LabelSize::Small)
+                                        .toggle_state(!showing_logs)
+                                        .on_click(cx.listener(|panel, _, _, cx| {
+                                            panel.show_debug_logs = false;
+                                            cx.notify();
+                                        })),
+                                )
+                                .child(
+                                    Button::new("debug-view-logs", t!("Adapter Logs"))
+                                        .label_size(LabelSize::Small)
+                                        .toggle_state(showing_logs)
+                                        .disabled(self.debug_log_view.is_none())
+                                        .on_click(cx.listener(|panel, _, _, cx| {
+                                            panel.show_debug_logs = true;
+                                            cx.notify();
+                                        })),
+                                ),
+                        )
+                    })
                     .child(
                         h_flex()
                     .gap_0p5()
                     .items_center()
-                    .when(showing_problems, |this| this.hidden())
+                    .when(showing_problems || showing_debug, |this| this.hidden())
                     .when_some(single_title, |this, title| {
                         this.child(
                             h_flex()
@@ -3186,6 +3261,26 @@ impl Render for TerminalPanel {
                     .bg(cx.theme().colors().panel_background)
                     .child(view)
             });
+        let debug_overlay = (self.show_debug_console && !self.show_problems)
+            .then(|| {
+                if self.show_debug_logs {
+                    self.debug_log_view.clone()
+                } else {
+                    self.debug_console_view.clone()
+                }
+            })
+            .flatten()
+            .map(|view| {
+                div()
+                    .absolute()
+                    .top(ui::scaled_px(32.))
+                    .left_0()
+                    .right_0()
+                    .bottom_0()
+                    .occlude()
+                    .bg(cx.theme().colors().panel_background)
+                    .child(view)
+            });
         let show_terminal_list = self
             .center
             .panes()
@@ -3254,6 +3349,7 @@ impl Render for TerminalPanel {
                     )
                     .children(restoring_placeholder)
                     .children(problems_overlay)
+                    .children(debug_overlay)
             })
             .ok()
             .map(|div| {
