@@ -125,6 +125,56 @@ unsafe extern "C" {
     #[allow(non_upper_case_globals)]
     static NSDraggingImageComponentIconKey: id;
 }
+fn set_warning_icon(alert: &Retained<NSAlert>, critical: bool) {
+    unsafe {
+        let alert_ptr = Retained::as_ptr(alert) as *mut Object;
+        let symbol = if critical {
+            "xmark.octagon.fill"
+        } else {
+            "exclamationmark.triangle.fill"
+        };
+        let image: id = msg_send![class!(NSImage),
+            imageWithSystemSymbolName: ns_string(symbol)
+            accessibilityDescription: nil];
+        if image == nil {
+            return;
+        }
+        let white: id = msg_send![class!(NSColor), whiteColor];
+        let accent: id = if critical {
+            msg_send![class!(NSColor), systemRedColor]
+        } else {
+            msg_send![class!(NSColor), systemYellowColor]
+        };
+        let colors: id = msg_send![class!(NSArray), arrayWithObjects: [white, accent].as_ptr() count: 2usize];
+        let palette: id = msg_send![class!(NSImageSymbolConfiguration), configurationWithPaletteColors: colors];
+        let size_config: id = msg_send![class!(NSImageSymbolConfiguration),
+            configurationWithPointSize: 48f64
+            weight: 0f64
+            scale: 3isize];
+        let combined: id = msg_send![size_config, configurationByApplyingConfiguration: palette];
+        let configured: id = msg_send![image, imageWithSymbolConfiguration: combined];
+        if configured == nil {
+            return;
+        }
+        let symbol_size: NSSize = msg_send![configured, size];
+        let side = 64.0f64;
+        let canvas_width = 216.0f64;
+        let fit = (side * 0.9 / symbol_size.width.max(symbol_size.height)).min(1.0);
+        let width = symbol_size.width * fit;
+        let height = symbol_size.height * fit;
+        let canvas: id = msg_send![class!(NSImage), alloc];
+        let canvas: id = msg_send![canvas, initWithSize: NSSize::new(canvas_width, side)];
+        let _: () = msg_send![canvas, lockFocus];
+        let _: () = msg_send![configured,
+            drawInRect: NSRect::new(
+                NSPoint::new((canvas_width - width) / 2.0, (side - height) / 2.0),
+                NSSize::new(width, height),
+            )];
+        let _: () = msg_send![canvas, unlockFocus];
+        let _: () = msg_send![alert_ptr, setIcon: canvas];
+    }
+}
+
 #[ctor(unsafe)]
 unsafe fn build_classes() {
     unsafe {
@@ -1778,6 +1828,9 @@ impl PlatformWindow for MacWindow {
         });
         let message = NSString::from_str(msg);
         alert.setMessageText(message.as_ref());
+        if !matches!(level, PromptLevel::Info) {
+            set_warning_icon(&alert, matches!(level, PromptLevel::Critical));
+        }
 
         if let Some(detail) = detail {
             let detail_text = NSString::from_str(detail);

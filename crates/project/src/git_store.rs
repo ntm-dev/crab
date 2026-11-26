@@ -7099,6 +7099,38 @@ impl Repository {
         )
     }
 
+    pub fn merge_commits(
+        &mut self,
+        path: String,
+        _cx: &mut Context<Self>,
+    ) -> oneshot::Receiver<Result<git::repository::MergeCommits>> {
+        self.send_job("merge commits", None, move |git_repo, _| async move {
+            match git_repo {
+                RepositoryState::Local(LocalRepositoryState {
+                    backend,
+                    environment,
+                    ..
+                }) => backend.merge_commits(path, environment).await,
+                RepositoryState::Remote(_) => Ok(git::repository::MergeCommits::default()),
+            }
+        })
+    }
+
+    pub fn merge_abort(&mut self, _cx: &mut Context<Self>) -> oneshot::Receiver<Result<()>> {
+        self.send_job("merge abort", Some("git merge --abort".into()), move |git_repo, _| async move {
+            match git_repo {
+                RepositoryState::Local(LocalRepositoryState {
+                    backend,
+                    environment,
+                    ..
+                }) => backend.merge_abort(environment).await,
+                RepositoryState::Remote(_) => {
+                    anyhow::bail!("Aborting a merge is not supported on remote projects")
+                }
+            }
+        })
+    }
+
     pub fn reset(
         &mut self,
         commit: String,

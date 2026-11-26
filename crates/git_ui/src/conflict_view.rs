@@ -5,15 +5,16 @@ use editor::{
     display_map::{BlockContext, BlockPlacement, BlockProperties, BlockStyle, CustomBlockId},
 };
 use gpui::{
-    App, Context, Entity, InteractiveElement as _, ParentElement as _, Subscription, Task,
-    WeakEntity,
+    App, Context, Empty, Entity, EventEmitter, InteractiveElement as _, ParentElement as _,
+    Subscription, Task, WeakEntity,
 };
 use i18n::t;
 use language::{Anchor, Buffer, BufferId};
 use project::{ConflictRegion, ConflictSet, ConflictSetUpdate};
 use std::{ops::Range, sync::Arc};
-use ui::prelude::*;
+use ui::{Tooltip, prelude::*};
 use util::debug_panic;
+use workspace::{ToolbarItemEvent, ToolbarItemLocation, ToolbarItemView, item::ItemHandle};
 
 pub(crate) struct ConflictAddon {
     buffers: HashMap<BufferId, BufferConflicts>,
@@ -447,4 +448,117 @@ pub(crate) fn resolve_conflict(
             })
             .ok();
     })
+}
+
+pub struct ConflictNavigationToolbar {
+    editor: Option<WeakEntity<Editor>>,
+    _subscription: Option<Subscription>,
+}
+
+impl ConflictNavigationToolbar {
+    pub fn new(_: &mut Context<Self>) -> Self {
+        Self {
+            editor: None,
+            _subscription: None,
+        }
+    }
+
+    fn conflict_starts(editor: &Editor, cx: &App) -> Vec<editor::Anchor> {
+        let Some(addon) = editor.addon::<ConflictAddon>() else {
+            return Vec::new();
+        };
+        let snapshot = editor.buffer().read(cx).snapshot(cx);
+        let mut starts: Vec<editor::Anchor> = addon
+            .buffers
+            .values()
+            .flat_map(|conflicts| conflicts.block_ids.iter())
+            .filter_map(|(range, _)| {
+                snapshot
+                    .buffer_anchor_range_to_anchor_range(range.clone())
+                    .map(|range| range.start)
+            })
+            .collect();
+        starts.sort_by(|a, b| a.cmp(b, &snapshot));
+        starts
+    }
+
+    fn navigate(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(editor) = self.editor.as_ref().and_then(|editor| editor.upgrade()) else {
+            return;
+        };
+        editor.update(cx, |editor, cx| {
+            let starts = Self::conflict_starts(editor, cx);
+            if starts.is_empty() {
+                return;
+            }
+            let snapshot = editor.buffer().read(cx).snapshot(cx);
+            let cursor = editor.selections.newest_anchor().head();
+            let target = if forward {
+                starts
+                    .iter()
+                    .find(|start| start.cmp(&cursor, &snapshot).is_gt())
+                    .or(starts.first())
+            } else {
+                starts
+                    .iter()
+                    .rev()
+                    .find(|start| start.cmp(&cursor, &snapshot).is_lt())
+                    .or(starts.last())
+            };
+            if let Some(&target) = target {
+                editor.change_selections(
+                    editor::SelectionEffects::scroll(editor::scroll::Autoscroll::center()),
+                    window,
+                    cx,
+                    |selections| selections.select_ranges([target..target]),
+                );
+            }
+        });
+    }
+}
+
+impl EventEmitter<ToolbarItemEvent> for ConflictNavigationToolbar {}
+
+impl ToolbarItemView for ConflictNavigationToolbar {
+    fn set_active_pane_item(
+        &mut self,
+        active_pane_item: Option<&dyn ItemHandle>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> ToolbarItemLocation {
+        let editor = active_pane_item.and_then(|item| item.act_as::<Editor>(cx));
+        self._subscription = editor
+            .as_ref()
+            .map(|editor| cx.observe(editor, |_, _, cx| cx.notify()));
+        self.editor = editor.map(|editor| editor.downgrade());
+        ToolbarItemLocation::Hidden
+    }
+}
+
+impl Render for ConflictNavigationToolbar {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let has_conflicts = self
+            .editor
+            .as_ref()
+            .and_then(|editor| editor.upgrade())
+            .is_some_and(|editor| !Self::conflict_starts(editor.read(cx), cx).is_empty());
+        if !has_conflicts {
+            return Empty.into_any_element();
+        }
+        h_flex()
+            .gap_0p5()
+            .child(
+                IconButton::new("conflict-previous", IconName::ArrowUp)
+                    .icon_size(IconSize::Small)
+                    .tooltip(Tooltip::text(t!("Previous Conflict")))
+                    .on_click(cx.listener(|this, _, window, cx| this.navigate(false, window, cx))),
+            )
+            .child(
+                IconButton::new("conflict-next", IconName::ArrowDown)
+                    .icon_size(IconSize::Small)
+                    .tooltip(Tooltip::text(t!("Next Conflict")))
+                    .on_click(cx.listener(|this, _, window, cx| this.navigate(true, window, cx))),
+            )
+            .into_any_element()
+    }
 }

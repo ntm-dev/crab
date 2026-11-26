@@ -18,6 +18,13 @@ pub fn open_output(
 
     let plain_text = terminal::strip_ansi_text(output.as_bytes());
 
+    if let Some(panel) = workspace.focus_panel::<terminal_view::terminal_panel::TerminalPanel>(window, cx)
+    {
+        let text = format!("git {operation}\n\n{plain_text}");
+        panel.update(cx, |panel, cx| panel.show_output(text, window, cx));
+        return;
+    }
+
     let buffer = cx.new(|cx| Buffer::local(plain_text.as_str(), cx));
     buffer.update(cx, |buffer, cx| {
         buffer.set_capability(language::Capability::ReadOnly, cx);

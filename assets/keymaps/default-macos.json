@@ -854,12 +854,20 @@
       "enter": "editor::Newline",
       "cmd-enter": "git::Commit",
       "cmd-shift-enter": "git::Amend",
-      "tab": "git_panel::FocusChanges",
+      "tab": "git_panel::FocusCommitButton",
       "shift-tab": "git_panel::FocusChanges",
       "alt-up": "git_panel::FocusChanges",
       "shift-escape": "git::ExpandCommitEditor",
       "alt-shift-escape": "git::ToggleFillCommitEditor",
       "alt-tab": "git::GenerateCommitMessage",
+    },
+  },
+  {
+    "context": "GitPanel > CommitButton",
+    "use_key_equivalents": true,
+    "bindings": {
+      "tab": "git_panel::FocusChanges",
+      "shift-tab": "git_panel::FocusEditor",
     },
   },
   {

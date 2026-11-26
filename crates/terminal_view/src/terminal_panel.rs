@@ -102,6 +102,8 @@ pub struct TerminalPanel {
     debug_log_view: Option<AnyView>,
     show_debug_console: bool,
     show_debug_logs: bool,
+    output_view: Option<Entity<editor::Editor>>,
+    show_output: bool,
     hidden_tabs: HashSet<PanelTab>,
     show_tab_icons: bool,
 }
@@ -172,6 +174,25 @@ impl TerminalPanel {
         }
         self.show_problems = true;
         self.show_debug_console = false;
+        self.show_output = false;
+        cx.notify();
+    }
+
+    pub fn show_output(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
+        let buffer = cx.new(|cx| language::Buffer::local(text, cx));
+        buffer.update(cx, |buffer, cx| {
+            buffer.set_capability(language::Capability::ReadOnly, cx);
+        });
+        let editor = cx.new(|cx| {
+            let mut editor = editor::Editor::for_buffer(buffer, None, window, cx);
+            editor.set_read_only(true);
+            editor
+        });
+        self.output_view = Some(editor);
+        self.hidden_tabs.remove(&PanelTab::Output);
+        self.show_output = true;
+        self.show_problems = false;
+        self.show_debug_console = false;
         cx.notify();
     }
 
@@ -197,6 +218,7 @@ impl TerminalPanel {
             return;
         }
         self.show_problems = false;
+        self.show_output = false;
         self.show_debug_console = true;
         self.show_debug_logs = logs && self.debug_log_view.is_some();
         cx.notify();
@@ -244,6 +266,8 @@ impl TerminalPanel {
             debug_log_view: None,
             show_debug_console: false,
             show_debug_logs: false,
+            output_view: None,
+            show_output: false,
             hidden_tabs: HashSet::from_iter([
                 PanelTab::Output,
                 PanelTab::Ports,
@@ -2558,6 +2582,7 @@ impl TerminalPanel {
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let maximized = self.maximized_from.is_some();
+        let showing_output = self.show_output && self.output_view.is_some();
         let showing_problems = self.show_problems;
         let showing_debug = self.show_debug_console && self.debug_console_view.is_some();
         let showing_logs = showing_debug && self.show_debug_logs;
@@ -2633,7 +2658,7 @@ impl TerminalPanel {
                             .text_size(ui::scaled_px(13.))
                             .when(hidden_tabs.contains(&PanelTab::Terminal), |tab| tab.hidden())
                             .map(|tab| {
-                                if showing_problems || showing_debug {
+                                if showing_problems || showing_debug || showing_output {
                                     tab.text_color(colors.text_muted)
                                         .hover(|style| style.text_color(colors.text))
                                 } else {
@@ -2645,6 +2670,7 @@ impl TerminalPanel {
                             .on_click(cx.listener(|panel, _, _, cx| {
                                 panel.show_problems = false;
                                 panel.show_debug_console = false;
+                                panel.show_output = false;
                                 cx.notify();
                             }))
                             .child(tab_content(PanelTab::Terminal)),
@@ -2700,11 +2726,26 @@ impl TerminalPanel {
                             .px(ui::scaled_px(10.))
                             .cursor_pointer()
                             .text_size(ui::scaled_px(13.))
-                            .text_color(colors.text_muted)
-                            .hover(|style| style.text_color(colors.text))
-                            .on_click(|_, window, cx| {
-                                window.dispatch_action(workspace::OpenLog.boxed_clone(), cx);
+                            .map(|tab| {
+                                if showing_output {
+                                    tab.rounded_t(px(4.))
+                                        .bg(colors.panel_background)
+                                        .text_color(colors.tab_active_foreground)
+                                } else {
+                                    tab.text_color(colors.text_muted)
+                                        .hover(|style| style.text_color(colors.text))
+                                }
                             })
+                            .on_click(cx.listener(|panel, _, window, cx| {
+                                if panel.output_view.is_some() {
+                                    panel.show_output = true;
+                                    panel.show_problems = false;
+                                    panel.show_debug_console = false;
+                                    cx.notify();
+                                } else {
+                                    window.dispatch_action(workspace::OpenLog.boxed_clone(), cx);
+                                }
+                            }))
                             .child(tab_content(PanelTab::Output)),
                     )
                     .child(
@@ -3261,6 +3302,21 @@ impl Render for TerminalPanel {
                     .bg(cx.theme().colors().panel_background)
                     .child(view)
             });
+        let output_overlay = self
+            .show_output
+            .then(|| self.output_view.clone())
+            .flatten()
+            .map(|view| {
+                div()
+                    .absolute()
+                    .top(ui::scaled_px(32.))
+                    .left_0()
+                    .right_0()
+                    .bottom_0()
+                    .occlude()
+                    .bg(cx.theme().colors().panel_background)
+                    .child(view)
+            });
         let debug_overlay = (self.show_debug_console && !self.show_problems)
             .then(|| {
                 if self.show_debug_logs {
@@ -3350,6 +3406,7 @@ impl Render for TerminalPanel {
                     .children(restoring_placeholder)
                     .children(problems_overlay)
                     .children(debug_overlay)
+                    .children(output_overlay)
             })
             .ok()
             .map(|div| {

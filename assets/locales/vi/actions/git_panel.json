@@ -27,6 +27,10 @@
     "name": "Chuyển tiêu điểm đến danh sách thay đổi",
     "description": "Chuyển tiêu điểm đến danh sách thay đổi."
   },
+  "git_panel::FocusCommitButton": {
+    "name": "Chuyển tiêu điểm đến nút commit",
+    "description": "Chuyển tiêu điểm đến nút commit."
+  },
   "git_panel::FocusEditor": {
     "name": "Chuyển tiêu điểm đến trình soạn thảo commit",
     "description": "Chuyển tiêu điểm đến trình soạn thảo thông điệp commit."

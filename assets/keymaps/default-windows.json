@@ -818,7 +818,7 @@
     "use_key_equivalents": true,
     "bindings": {
       "escape": "git_panel::FocusChanges",
-      "tab": "git_panel::FocusChanges",
+      "tab": "git_panel::FocusCommitButton",
       "shift-tab": "git_panel::FocusChanges",
       "enter": "editor::Newline",
       "ctrl-enter": "git::Commit",
@@ -827,6 +827,14 @@
       "shift-escape": "git::ExpandCommitEditor",
       "alt-shift-escape": "git::ToggleFillCommitEditor",
       "alt-l": "git::GenerateCommitMessage",
+    },
+  },
+  {
+    "context": "GitPanel > CommitButton",
+    "use_key_equivalents": true,
+    "bindings": {
+      "tab": "git_panel::FocusChanges",
+      "shift-tab": "git_panel::FocusEditor",
     },
   },
   {

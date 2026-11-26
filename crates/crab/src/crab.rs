@@ -1247,10 +1247,17 @@ fn initialize_pane(
 ) {
     pane.update(cx, |pane, cx| {
         pane.set_render_tab_bar_leading_buttons(cx, |pane, _, cx| {
-            pane.toolbar()
-                .read(cx)
+            let toolbar = pane.toolbar().read(cx);
+            let conflict_navigation = toolbar.item_of_type::<git_ui::ConflictNavigationToolbar>();
+            toolbar
                 .item_of_type::<QuickActionBar>()
-                .map(|quick_action_bar| quick_action_bar.into_any_element())
+                .map(|quick_action_bar| {
+                    h_flex()
+                        .gap_0p5()
+                        .children(conflict_navigation)
+                        .child(quick_action_bar)
+                        .into_any_element()
+                })
         });
         pane.toolbar().update(cx, |toolbar, cx| {
             let multibuffer_hint = cx.new(|_| MultibufferHint::new());
@@ -1259,6 +1266,8 @@ fn initialize_pane(
             toolbar.add_item(solo_diff_style_toolbar, window, cx);
             let file_diff_style_toolbar = cx.new(FileDiffStyleToolbar::new);
             toolbar.add_item(file_diff_style_toolbar, window, cx);
+            let conflict_navigation = cx.new(git_ui::ConflictNavigationToolbar::new);
+            toolbar.add_item(conflict_navigation, window, cx);
             let breadcrumbs = cx.new(|_| Breadcrumbs::new());
             toolbar.add_item(breadcrumbs, window, cx);
             let buffer_search_bar = cx.new(|cx| {

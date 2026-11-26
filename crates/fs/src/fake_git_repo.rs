@@ -1185,6 +1185,18 @@ impl GitRepository for FakeGitRepository {
         unimplemented!()
     }
 
+    fn merge_abort(&self, _env: Arc<HashMap<String, String>>) -> BoxFuture<'_, Result<()>> {
+        unimplemented!()
+    }
+
+    fn merge_commits(
+        &self,
+        _path: String,
+        _env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<git::repository::MergeCommits>> {
+        async { Ok(git::repository::MergeCommits::default()) }.boxed()
+    }
+
     fn stash_pop(
         &self,
         _index: Option<usize>,

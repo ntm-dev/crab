@@ -67,10 +67,10 @@ impl QuickActionBar {
         this
     }
 
-    fn active_editor(&self) -> Option<Entity<Editor>> {
+    fn active_editor(&self, cx: &App) -> Option<Entity<Editor>> {
         self.active_item
             .as_ref()
-            .and_then(|item| item.downcast::<Editor>())
+            .and_then(|item| item.act_as::<Editor>(cx))
     }
 
     fn apply_settings(&mut self, cx: &mut Context<Self>) {
@@ -90,7 +90,7 @@ impl QuickActionBar {
 
 impl Render for QuickActionBar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let Some(editor) = self.active_editor() else {
+        let Some(editor) = self.active_editor(cx) else {
             return div().id("empty quick action bar");
         };
 
@@ -676,7 +676,7 @@ impl ToolbarItemView for QuickActionBar {
         if let Some(active_item) = active_pane_item {
             self._inlay_hints_enabled_subscription.take();
 
-            if let Some(editor) = active_item.downcast::<Editor>() {
+            if let Some(editor) = active_item.act_as::<Editor>(cx) {
                 let (
                     mut inlay_hints_enabled,
                     mut supports_inlay_hints,

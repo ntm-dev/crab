@@ -281,8 +281,10 @@ impl DebugPanel {
             }
         });
 
-        let boot_task = cx.spawn({
+        let boot_task = cx.spawn_in(window, {
             let session = session.clone();
+            let launch_file = vscode_launch_file(&self.project, cx);
+            let workspace = self.workspace.clone();
 
             async move |_, cx| {
                 if let Err(error) = task.await {
@@ -299,6 +301,7 @@ impl DebugPanel {
                             session.shutdown(cx)
                         })
                         .await;
+                    prompt_session_failure(&redacted_error, launch_file, workspace, cx).await;
                 }
                 anyhow::Ok(())
             }
@@ -398,6 +401,8 @@ impl DebugPanel {
         let binary = curr_session.read(cx).binary().cloned().unwrap();
         let task_context = curr_session.read(cx).task_context().clone();
 
+        let launch_file = vscode_launch_file(&self.project, cx);
+        let workspace = self.workspace.clone();
         let curr_session_id = curr_session.read(cx).session_id();
         self.sessions_with_children
             .retain(|session, _| session.read(cx).session_id(cx) != curr_session_id);
@@ -434,6 +439,13 @@ impl DebugPanel {
                         session.shutdown(cx)
                     })
                     .await;
+                prompt_session_failure(
+                    &redact_command(&format!("{error:#}")),
+                    launch_file,
+                    workspace,
+                    cx,
+                )
+                .await;
 
                 return Err(error);
             };
@@ -1491,6 +1503,59 @@ impl DebugPanel {
                 }
             })
             .anchor(Anchor::TopRight)
+    }
+}
+
+fn vscode_launch_file(project: &Entity<Project>, cx: &App) -> Option<ProjectPath> {
+    let path = paths::local_vscode_launch_file_relative_path();
+    project.read(cx).visible_worktrees(cx).find_map(|worktree| {
+        let worktree = worktree.read(cx);
+        worktree.entry_for_path(path).map(|_| ProjectPath {
+            worktree_id: worktree.id(),
+            path: path.into(),
+        })
+    })
+}
+
+async fn prompt_session_failure(
+    message: &str,
+    launch_file: Option<ProjectPath>,
+    workspace: WeakEntity<Workspace>,
+    cx: &mut AsyncWindowContext,
+) {
+    let file_name = if launch_file.is_some() {
+        "launch.json"
+    } else {
+        "debug.json"
+    };
+    let response = cx.prompt(
+        gpui::PromptLevel::Warning,
+        message,
+        None,
+        &[
+            PromptButton::new(t!("Open '{file}'", file = file_name)),
+            PromptButton::cancel(t!("Cancel")),
+        ],
+    );
+    if response.await != Ok(0) {
+        return;
+    }
+    match launch_file {
+        Some(project_path) => {
+            workspace
+                .update_in(cx, |workspace, window, cx| {
+                    workspace
+                        .open_path(project_path, None, true, window, cx)
+                        .detach_and_log_err(cx);
+                })
+                .ok();
+        }
+        None => {
+            cx.update(|window, cx| {
+                window.dispatch_action(crab_actions::OpenProjectDebugTasks.boxed_clone(), cx);
+            })
+            .ok();
+        }
     }
 }
 

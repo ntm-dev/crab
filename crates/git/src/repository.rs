@@ -229,6 +229,47 @@ fn parse_cat_file_commit(sha: Oid, content: &str) -> Option<CommitData> {
     })
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MergeCommit {
+    pub sha: SharedString,
+    pub status: SharedString,
+    pub author: SharedString,
+    pub timestamp: i64,
+    pub subject: SharedString,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MergeCommits {
+    pub current: Vec<MergeCommit>,
+    pub incoming: Vec<MergeCommit>,
+}
+
+fn parse_merge_commits(output: &str) -> Vec<MergeCommit> {
+    output
+        .split('\u{1e}')
+        .filter_map(|record| {
+            let mut lines = record.lines();
+            let header = lines.next()?;
+            let mut fields = header.splitn(4, '\u{1f}');
+            let sha = fields.next()?.to_string();
+            let author = fields.next()?.to_string();
+            let timestamp = fields.next()?.parse().ok()?;
+            let subject = fields.next()?.to_string();
+            let status = lines
+                .find_map(|line| line.chars().next().filter(|c| c.is_ascii_alphabetic()))
+                .map(|c| c.to_string())
+                .unwrap_or_default();
+            Some(MergeCommit {
+                sha: sha.into(),
+                status: status.into(),
+                author: author.into(),
+                timestamp,
+                subject: subject.into(),
+            })
+        })
+        .collect()
+}
+
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub struct Branch {
     pub is_head: bool,
@@ -631,6 +672,25 @@ async fn read_shallow_file(shallow_file_path: &Path) -> Result<Option<String>> {
     }
 }
 
+async fn retain_shallow_boundaries(blame: &mut crate::blame::Blame, shallow_file_path: &Path) {
+    let shallow_oids: HashSet<String> = read_shallow_file(shallow_file_path)
+        .await
+        .ok()
+        .flatten()
+        .map(|contents| {
+            contents
+                .lines()
+                .map(|line| line.trim().to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    for entry in &mut blame.entries {
+        if entry.boundary && !shallow_oids.contains(&entry.sha.to_string()) {
+            entry.boundary = false;
+        }
+    }
+}
+
 async fn is_shallow_boundary_commit(
     git: &GitBinary,
     shallow_file_path: &Path,
@@ -991,6 +1051,14 @@ pub trait GitRepository: Send + Sync {
         message: Option<String>,
         env: Arc<HashMap<String, String>>,
     ) -> BoxFuture<'_, Result<()>>;
+
+    fn merge_abort(&self, env: Arc<HashMap<String, String>>) -> BoxFuture<'_, Result<()>>;
+
+    fn merge_commits(
+        &self,
+        path: String,
+        env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<MergeCommits>>;
 
     fn stash_pop(
         &self,
@@ -2503,11 +2571,15 @@ impl GitRepository for RealGitRepository {
         line_ending: LineEnding,
     ) -> BoxFuture<'_, Result<crate::blame::Blame>> {
         let git = self.git_binary_in_worktree();
+        let shallow_file_path = self.common_dir.join("shallow");
 
         self.executor
             .spawn(async move {
                 let git = git?;
-                crate::blame::Blame::for_path(&git, &path, &content, line_ending).await
+                let mut blame =
+                    crate::blame::Blame::for_path(&git, &path, &content, line_ending).await?;
+                retain_shallow_boundaries(&mut blame, &shallow_file_path).await;
+                Ok(blame)
             })
             .boxed()
     }
@@ -2518,11 +2590,15 @@ impl GitRepository for RealGitRepository {
         revision: Oid,
     ) -> BoxFuture<'_, Result<crate::blame::Blame>> {
         let git = self.git_binary_in_worktree();
+        let shallow_file_path = self.common_dir.join("shallow");
 
         self.executor
             .spawn(async move {
                 let git = git?;
-                crate::blame::Blame::for_path_at_revision(&git, &path, revision).await
+                let mut blame =
+                    crate::blame::Blame::for_path_at_revision(&git, &path, revision).await?;
+                retain_shallow_boundaries(&mut blame, &shallow_file_path).await;
+                Ok(blame)
             })
             .boxed()
     }
@@ -2720,6 +2796,66 @@ impl GitRepository for RealGitRepository {
                 anyhow::ensure!(
                     output.status.success(),
                     "Failed to stash staged changes (requires git 2.35 or newer):\n{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                Ok(())
+            })
+            .boxed()
+    }
+
+    fn merge_commits(
+        &self,
+        path: String,
+        env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<MergeCommits>> {
+        let git = self.git_binary_in_worktree();
+        self.executor
+            .spawn(async move {
+                let git = git?;
+                let log = async |range: &str| -> Result<Vec<MergeCommit>> {
+                    let output = git
+                        .build_command(&[
+                            "log",
+                            "-n",
+                            "50",
+                            "--format=%x1e%H%x1f%an%x1f%ct%x1f%s",
+                            "--name-status",
+                            range,
+                            "--",
+                            path.as_str(),
+                        ])
+                        .envs(env.iter())
+                        .output()
+                        .await?;
+                    anyhow::ensure!(
+                        output.status.success(),
+                        "Failed to read merge commits:\n{}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                    Ok(parse_merge_commits(&String::from_utf8_lossy(&output.stdout)))
+                };
+                Ok(MergeCommits {
+                    incoming: log("HEAD..MERGE_HEAD").await?,
+                    current: log("MERGE_HEAD..HEAD").await?,
+                })
+            })
+            .boxed()
+    }
+
+    fn merge_abort(&self, env: Arc<HashMap<String, String>>) -> BoxFuture<'_, Result<()>> {
+        let git = self.git_binary_in_worktree();
+        self.executor
+            .spawn(async move {
+                let git = git?;
+                let output = git
+                    .build_command(&["merge", "--abort"])
+                    .envs(env.iter())
+                    .output()
+                    .await?;
+
+                anyhow::ensure!(
+                    output.status.success(),
+                    "Failed to abort merge:\n{}",
                     String::from_utf8_lossy(&output.stderr)
                 );
                 Ok(())

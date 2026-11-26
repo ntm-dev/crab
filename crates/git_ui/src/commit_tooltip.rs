@@ -215,12 +215,22 @@ impl Asset for CommitAvatarAsset {
     }
 }
 
+const MAX_LINE_CHANGE_ROWS: usize = 6;
+
+#[derive(Default)]
+struct LineChange {
+    removed: Vec<SharedString>,
+    added: Vec<SharedString>,
+}
+
 pub struct CommitTooltip {
     commit: CommitDetails,
     scroll_handle: ScrollHandle,
     markdown: Entity<Markdown>,
     repository: Entity<Repository>,
     workspace: WeakEntity<Workspace>,
+    line_change: Option<LineChange>,
+    line_change_task: Task<()>,
 }
 
 impl CommitTooltip {
@@ -237,7 +247,11 @@ impl CommitTooltip {
             .and_then(|t| OffsetDateTime::from_unix_timestamp(t).ok())
             .unwrap_or(OffsetDateTime::now_utc());
 
-        Self::new(
+        let filename = blame.filename.clone();
+        let line_start = blame.original_line_number;
+        let line_count = blame.range.end.saturating_sub(blame.range.start);
+
+        let mut this = Self::new(
             CommitDetails {
                 sha: blame.sha.to_string().into(),
                 commit_time,
@@ -254,7 +268,69 @@ impl CommitTooltip {
             repository,
             workspace,
             cx,
-        )
+        );
+        this.load_line_change(filename, line_start, line_count, cx);
+        this
+    }
+
+    fn load_line_change(
+        &mut self,
+        filename: String,
+        line_start: u32,
+        line_count: u32,
+        cx: &mut Context<Self>,
+    ) {
+        let sha = self.commit.sha.to_string();
+        let receiver = self
+            .repository
+            .update(cx, |repository, _| repository.load_commit_diff(sha, true));
+        self.line_change_task = cx.spawn(async move |this, cx| {
+            let Ok(Ok(diff)) = receiver.await else {
+                return;
+            };
+            let Some(file) = diff
+                .files
+                .into_iter()
+                .find(|file| file.path.as_unix_str() == filename)
+            else {
+                return;
+            };
+            if file.is_binary {
+                return;
+            }
+            let old_text = file.old_text.unwrap_or_default();
+            let new_text = file.new_text.unwrap_or_default();
+            let old_lines: Vec<&str> = old_text.lines().collect();
+            let new_lines: Vec<&str> = new_text.lines().collect();
+            let target_start = line_start.saturating_sub(1);
+            let target_end = target_start + line_count.max(1);
+
+            let mut change = LineChange::default();
+            for (old_rows, new_rows) in language::line_diff(&old_text, &new_text) {
+                if new_rows.is_empty() || new_rows.start >= target_end || new_rows.end <= target_start
+                {
+                    continue;
+                }
+                for row in old_rows {
+                    if let Some(line) = old_lines.get(row as usize) {
+                        change.removed.push(SharedString::from(line.to_string()));
+                    }
+                }
+                for row in new_rows {
+                    if let Some(line) = new_lines.get(row as usize) {
+                        change.added.push(SharedString::from(line.to_string()));
+                    }
+                }
+            }
+            if change.removed.is_empty() && change.added.is_empty() {
+                return;
+            }
+            this.update(cx, |this, cx| {
+                this.line_change = Some(change);
+                cx.notify();
+            })
+            .ok();
+        });
     }
 
     pub fn new(
@@ -281,6 +357,8 @@ impl CommitTooltip {
             workspace,
             scroll_handle: ScrollHandle::new(),
             markdown,
+            line_change: None,
+            line_change_task: Task::ready(()),
         }
     }
 }
@@ -362,6 +440,47 @@ impl Render for CommitTooltip {
             })
             .flatten();
 
+        let line_change = self.line_change.as_ref().map(|change| {
+            let status = cx.theme().status();
+            let removed_background = status.deleted_background;
+            let added_background = status.created_background;
+            let border = cx.theme().colors().border_variant;
+            let row = |prefix: &'static str, line: &SharedString, background| {
+                h_flex()
+                    .w_full()
+                    .px_1()
+                    .gap_1()
+                    .bg(background)
+                    .child(Label::new(prefix).buffer_font(cx).size(LabelSize::Small))
+                    .child(
+                        div().min_w_0().overflow_x_hidden().child(
+                            Label::new(line.clone())
+                                .buffer_font(cx)
+                                .size(LabelSize::Small)
+                                .single_line(),
+                        ),
+                    )
+            };
+            v_flex()
+                .py_1()
+                .border_t_1()
+                .border_color(border)
+                .children(
+                    change
+                        .removed
+                        .iter()
+                        .take(MAX_LINE_CHANGE_ROWS)
+                        .map(|line| row("-", line, removed_background)),
+                )
+                .children(
+                    change
+                        .added
+                        .iter()
+                        .take(MAX_LINE_CHANGE_ROWS)
+                        .map(|line| row("+", line, added_background)),
+                )
+        });
+
         tooltip_container(cx, move |this, cx| {
             this.occlude()
                 .on_mouse_move(|_, _, cx| cx.stop_propagation())
@@ -397,6 +516,7 @@ impl Render for CommitTooltip {
                                 .overflow_y_scroll()
                                 .child(message),
                         )
+                        .children(line_change)
                         .child(
                             h_flex()
                                 .text_color(cx.theme().colors().text_muted)

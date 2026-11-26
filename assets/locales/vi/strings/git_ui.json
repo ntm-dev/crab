@@ -135,5 +135,21 @@
   "Loading": "Đang tải",
   "Loading Commit History…": "Đang tải lịch sử commit…",
   "Loading…": "Đang tải…",
-  "Local Branches": "Nhánh cục bộ"
+  "Local Branches": "Nhánh cục bộ",
+  "Are you sure you want to stage {file} with merge conflicts?": "Bạn có chắc muốn stage {file} khi còn xung đột merge không?",
+  "Yes": "Có",
+  "Previous Conflict": "Xung đột trước",
+  "Next Conflict": "Xung đột tiếp theo",
+  "Resolve conflicts to continue merging {incoming} into {current}": "Giải quyết xung đột để tiếp tục merge {incoming} vào {current}",
+  "Open File": "Mở tệp",
+  "Open Changes": "Mở các thay đổi",
+  "Current changes": "Thay đổi hiện tại",
+  "Incoming changes": "Thay đổi đến",
+  "Continue Merge": "Tiếp tục merge",
+  "Abort Merge": "Hủy merge",
+  "1 conflict": "1 xung đột",
+  "{count} conflicts": "{count} xung đột",
+  "Merging {incoming} into {current}": "Đang merge {incoming} vào {current}",
+  "Resolve 1 conflict before continuing": "Giải quyết 1 xung đột trước khi tiếp tục",
+  "Resolve {count} conflicts before continuing": "Giải quyết {count} xung đột trước khi tiếp tục"
 }

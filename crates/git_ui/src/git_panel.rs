@@ -127,6 +127,8 @@ actions!(
         FocusEditor,
         /// Focuses on the changes list.
         FocusChanges,
+        /// Focuses on the commit button.
+        FocusCommitButton,
         /// Select next git panel menu item, and show it in the diff view
         NextEntry,
         /// Select previous git panel menu item, and show it in the diff view
@@ -928,14 +930,17 @@ enum DiffTarget {
     Unstaged,
 }
 
+fn is_unresolved_conflict(repo: &Repository, path: &RepoPath) -> bool {
+    repo.status_for_path(path)
+        .is_some_and(|entry| entry.status.is_conflicted())
+}
+
 impl GitHeaderEntry {
     pub fn contains(&self, status_entry: &GitStatusEntry, repo: &Repository) -> bool {
         let this = &self.header;
         let status = status_entry.status;
         match this {
-            Section::Conflict => {
-                repo.had_conflict_on_last_merge_head_change(&status_entry.repo_path)
-            }
+            Section::Conflict => is_unresolved_conflict(repo, &status_entry.repo_path),
             Section::Tracked => !status.is_created(),
             Section::New => status.is_created(),
             // Conflicted files render only under the Conflict section, so the
@@ -943,11 +948,11 @@ impl GitHeaderEntry {
             // All" would silently un-resolve conflicts, and "Stage All" would
             // silently mark them resolved.
             Section::Staged => {
-                !repo.had_conflict_on_last_merge_head_change(&status_entry.repo_path)
+                !is_unresolved_conflict(repo, &status_entry.repo_path)
                     && GitPanel::stage_status_for_entry(status_entry, repo).has_staged()
             }
             Section::Unstaged => {
-                !repo.had_conflict_on_last_merge_head_change(&status_entry.repo_path)
+                !is_unresolved_conflict(repo, &status_entry.repo_path)
                     && GitPanel::stage_status_for_entry(status_entry, repo).has_unstaged()
             }
         }
@@ -1480,6 +1485,13 @@ pub struct GitPanel {
     single_staged_entry: Option<GitStatusEntry>,
     single_tracked_entry: Option<GitStatusEntry>,
     focus_handle: FocusHandle,
+    commit_button_focus_handle: FocusHandle,
+    merge_commits: HashMap<RepoPath, git::repository::MergeCommits>,
+    merge_commits_key: Option<SharedString>,
+    merge_commits_task: Task<()>,
+    merge_conflicts_expanded: bool,
+    merge_current_expanded: bool,
+    merge_incoming_expanded: bool,
     fs: Arc<dyn Fs>,
     new_count: usize,
     entry_count: usize,
@@ -1783,6 +1795,13 @@ impl GitPanel {
                 tree_expanded_dirs: HashMap::default(),
                 projected_entries_by_path: HashMap::default(),
                 focus_handle,
+                commit_button_focus_handle: cx.focus_handle().tab_stop(true),
+                merge_commits: Default::default(),
+                merge_commits_key: None,
+                merge_commits_task: Task::ready(()),
+                merge_conflicts_expanded: true,
+                merge_current_expanded: true,
+                merge_incoming_expanded: true,
                 fs,
                 new_count: 0,
                 new_staged_count: 0,
@@ -2039,14 +2058,14 @@ impl GitPanel {
                 .map(|status| status.status)
                 .map(|status| {
                     if GitPanelSettings::get_global(cx).group_by == GitPanelGroupBy::Staging {
-                        if repo.had_conflict_on_last_merge_head_change(&repo_path) {
+                        if is_unresolved_conflict(repo, &repo_path) {
                             Section::Conflict
                         } else if status.staging().has_staged() {
                             Section::Staged
                         } else {
                             Section::Unstaged
                         }
-                    } else if repo.had_conflict_on_last_merge_head_change(&repo_path) {
+                    } else if is_unresolved_conflict(repo, &repo_path) {
                         Section::Conflict
                     } else if status.is_created() {
                         Section::New
@@ -2649,6 +2668,16 @@ impl GitPanel {
         self.commit_editor.update(cx, |editor, cx| {
             window.focus(&editor.focus_handle(cx), cx);
         });
+        cx.notify();
+    }
+
+    fn focus_commit_button(
+        &mut self,
+        _: &FocusCommitButton,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.commit_button_focus_handle.focus(window, cx);
         cx.notify();
     }
 
@@ -3567,7 +3596,7 @@ impl GitPanel {
         &mut self,
         entry: &GitListEntry,
         intent: StageIntent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(active_repository) = self.active_repository.clone() else {
@@ -3652,7 +3681,47 @@ impl GitPanel {
             self.set_bulk_staging_anchor(anchor, cx);
         }
 
-        self.change_file_stage(stage, repo_paths, cx);
+        let conflicted = if stage {
+            repo_paths
+                .iter()
+                .find(|entry| entry.status.is_conflicted())
+                .cloned()
+        } else {
+            None
+        };
+        let Some(conflicted) = conflicted else {
+            self.change_file_stage(stage, repo_paths, cx);
+            return;
+        };
+
+        let file_name = conflicted
+            .repo_path
+            .file_name()
+            .unwrap_or_default()
+            .to_string();
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &t!(
+                "Are you sure you want to stage {file} with merge conflicts?",
+                file = file_name
+            ),
+            None,
+            &[
+                PromptButton::new(t!("Yes")),
+                PromptButton::cancel(t!("Cancel")),
+            ],
+            cx,
+        );
+        cx.spawn(async move |this, cx| {
+            if answer.await != Ok(0) {
+                return;
+            }
+            this.update(cx, |this, cx| {
+                this.change_file_stage(stage, repo_paths, cx);
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn change_file_stage(
@@ -4345,7 +4414,11 @@ impl GitPanel {
 
     /// Suggests a commit message based on the changed files and their statuses
     fn commit_placeholder(&self, cx: &App) -> SharedString {
-        if let Some(message) = self.suggest_commit_message(cx) {
+        let merging = self
+            .active_repository
+            .as_ref()
+            .is_some_and(|repo| repo.read(cx).merge.message.is_some());
+        if !merging && let Some(message) = self.suggest_commit_message(cx) {
             return message.into();
         }
         let shortcut = if cfg!(target_os = "macos") {
@@ -5484,7 +5557,7 @@ impl GitPanel {
 
         for status_entry in repo.cached_status() {
             self.changes_count += 1;
-            let is_conflict = repo.had_conflict_on_last_merge_head_change(&status_entry.repo_path);
+            let is_conflict = is_unresolved_conflict(repo, &status_entry.repo_path);
             let is_new = status_entry.status.is_created();
             let staging = status_entry.status.staging();
 
@@ -6705,6 +6778,7 @@ impl GitPanel {
         };
 
         let left = left
+                    .track_focus(&self.commit_button_focus_handle)
                     .layer(ElevationIndex::ModalSurface)
                     .size(ButtonSize::Medium)
                     .full_width()
@@ -6759,6 +6833,7 @@ impl GitPanel {
 
         v_flex()
             .id("commit-wrapper")
+            .key_context("CommitButton")
             .w_full()
             .on_hover(cx.listener(move |this, hovered, _, cx| {
                 this.show_placeholders =
@@ -6956,7 +7031,7 @@ impl GitPanel {
                     .weight(gpui::FontWeight::BOLD)
                     .size(LabelSize::Small),
             )
-            .children(branch_name.map(|name| {
+            .children(branch_name.clone().map(|name| {
                 Label::new(name)
                     .size(LabelSize::Small)
                     .color(Color::Muted)
@@ -7020,12 +7095,516 @@ impl GitPanel {
                 })
         });
 
+        let conflict_count = repo
+            .read(cx)
+            .cached_status()
+            .filter(|entry| entry.status.is_conflicted())
+            .count();
+        let merge_row = (conflict_count > 0)
+            .then(|| {
+                let state = repo.read(cx);
+                let message = state.merge.message.clone()?;
+                let first_line = message.lines().next().unwrap_or_default();
+                let incoming: SharedString = first_line
+                    .split('\'')
+                    .nth(1)
+                    .unwrap_or("MERGE_HEAD")
+                    .to_string()
+                    .into();
+                let current: SharedString = branch_name
+                    .clone()
+                    .unwrap_or_else(|| SharedString::from("HEAD"));
+                let text: SharedString =
+                    t!("Resolve conflicts to continue merging {incoming} into {current}")
+                        .replace("{incoming}", &incoming)
+                        .replace("{current}", &current)
+                        .into();
+                let count_text: SharedString = if conflict_count == 1 {
+                    t!("1 conflict").to_string().into()
+                } else {
+                    t!("{count} conflicts")
+                        .replace("{count}", &conflict_count.to_string())
+                        .into()
+                };
+                let tooltip_title: SharedString = t!("Merging {incoming} into {current}")
+                    .replace("{incoming}", &incoming)
+                    .replace("{current}", &current)
+                    .into();
+                let tooltip_detail: SharedString = if conflict_count == 1 {
+                    t!("Resolve 1 conflict before continuing").to_string().into()
+                } else {
+                    t!("Resolve {count} conflicts before continuing")
+                        .replace("{count}", &conflict_count.to_string())
+                        .into()
+                };
+                Some(
+                    h_flex()
+                        .id("commits-merge-row")
+                        .group("commits-merge-row")
+                        .h(self.list_item_height())
+                        .w_full()
+                        .pl_5()
+                        .pr_2()
+                        .gap_1p5()
+                        .hover(|style| style.bg(hover_bg))
+                        .child(
+                            Icon::new(IconName::Warning)
+                                .size(IconSize::Small)
+                                .color(Color::Error),
+                        )
+                        .child(
+                            Label::new(text)
+                                .color(Color::Error)
+                                .single_line()
+                                .truncate(),
+                        )
+                        .child(
+                            Label::new(count_text)
+                                .size(LabelSize::Small)
+                                .color(Color::Muted)
+                                .single_line(),
+                        )
+                        .child(
+                            h_flex()
+                                .ml_auto()
+                                .gap_0p5()
+                                .invisible()
+                                .group_hover("commits-merge-row", |style| style.visible())
+                                .child(
+                                    IconButton::new("merge-continue", IconName::PlayFilled)
+                                        .icon_size(IconSize::Small)
+                                        .tooltip(Tooltip::text(t!("Continue Merge")))
+                                        .on_click(|_, _, cx| {
+                                            cx.defer(|cx| {
+                                                cx.dispatch_action(&git::Commit);
+                                            })
+                                        }),
+                                )
+                                .child(
+                                    IconButton::new("merge-abort", IconName::XCircle)
+                                        .icon_size(IconSize::Small)
+                                        .tooltip(Tooltip::text(t!("Abort Merge")))
+                                        .on_click({
+                                            let repo = repo.clone();
+                                            move |_, _, cx| {
+                                                let receiver =
+                                                    repo.update(cx, |repo, cx| repo.merge_abort(cx));
+                                                cx.spawn(async move |_| {
+                                                    if let Ok(Err(error)) = receiver.await {
+                                                        log::error!("{error:#}");
+                                                    }
+                                                })
+                                                .detach();
+                                            }
+                                        }),
+                                ),
+                        )
+                        .tooltip(move |_, cx| {
+                            Tooltip::with_meta(
+                                tooltip_title.clone(),
+                                None,
+                                tooltip_detail.clone(),
+                                cx,
+                            )
+                        }),
+                )
+            })
+            .flatten();
+
+        let merge_children = merge_row.is_some().then(|| {
+            let path_style = self.project.read(cx).path_style(cx);
+            let incoming: SharedString = repo
+                .read(cx)
+                .merge
+                .message
+                .as_ref()
+                .and_then(|message| message.lines().next())
+                .and_then(|line| line.split('\'').nth(1))
+                .unwrap_or("MERGE_HEAD")
+                .to_string()
+                .into();
+            let conflict_entries: Vec<GitStatusEntry> = self
+                .entries
+                .iter()
+                .filter_map(GitListEntry::status_entry)
+                .filter(|entry| entry.status.is_conflicted())
+                .unique_by(|entry| entry.repo_path.clone())
+                .cloned()
+                .collect();
+            let conflicts_label: SharedString = if conflict_count == 1 {
+                t!("1 conflict").to_string().into()
+            } else {
+                t!("{count} conflicts")
+                    .replace("{count}", &conflict_count.to_string())
+                    .into()
+            };
+            let chevron = |expanded: bool| {
+                Icon::new(if expanded {
+                    IconName::ChevronDown
+                } else {
+                    IconName::ChevronRight
+                })
+                .size(IconSize::XSmall)
+                .color(Color::Muted)
+            };
+            let guide_color = cx.theme().colors().border_variant;
+            let tree_row = |id: SharedString, depth: usize| {
+                h_flex()
+                    .id(id)
+                    .relative()
+                    .h(self.list_item_height())
+                    .w_full()
+                    .pl(px(20.0 + 14.0 * depth as f32))
+                    .pr_2()
+                    .gap_1p5()
+                    .cursor_pointer()
+                    .hover(|style| style.bg(hover_bg))
+                    .children((1..=depth).map(|level| {
+                        div()
+                            .absolute()
+                            .top_0()
+                            .bottom_0()
+                            .left(px(25.0 + 14.0 * (level as f32 - 1.0)))
+                            .w(px(1.0))
+                            .bg(guide_color)
+                    }))
+            };
+            let accent = cx.theme().colors().text_accent;
+            let now = OffsetDateTime::now_utc();
+            let local_offset =
+                time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
+            let commit_rows = |kind: &'static str,
+                               path: &RepoPath,
+                               commits: &[git::repository::MergeCommit]| {
+                commits
+                    .iter()
+                    .map(|commit| {
+                        let path = path.clone();
+                        let when = OffsetDateTime::from_unix_timestamp(commit.timestamp)
+                            .map(|time| {
+                                time_format::format_localized_timestamp(
+                                    time,
+                                    now,
+                                    local_offset,
+                                    time_format::TimestampFormat::Relative,
+                                )
+                            })
+                            .unwrap_or_default();
+                        let meta: SharedString = format!("{}, {}", commit.author, when).into();
+                        let sha = commit.sha.to_string();
+                        let status = commit.status.clone();
+                        let repo = repo.downgrade();
+                        let workspace = self.workspace.clone();
+                        let group: SharedString = format!("merge-{kind}-{sha}").into();
+                        let open_path = path.clone();
+                        let compare_path = path.clone();
+                        let compare_sha = sha.clone();
+                        let compare_repo = repo.clone();
+                        let compare_workspace = workspace.clone();
+                        tree_row(group.clone(), 4)
+                            .group(group.clone())
+                            .child(
+                                Icon::new(IconName::Person)
+                                    .size(IconSize::Small)
+                                    .color(Color::Muted),
+                            )
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .text_ui(cx)
+                                    .group_hover(group.clone(), move |style| {
+                                        style.text_color(accent)
+                                    })
+                                    .child(commit.subject.clone()),
+                            )
+                            .child(
+                                Label::new(meta)
+                                    .size(LabelSize::Small)
+                                    .color(Color::Muted)
+                                    .single_line()
+                                    .truncate(),
+                            )
+                            .child(
+                                h_flex()
+                                    .ml_auto()
+                                    .gap_0p5()
+                                    .child(
+                                        h_flex()
+                                            .invisible()
+                                            .group_hover(group.clone(), |style| style.visible())
+                                            .child(
+                                                IconButton::new(
+                                                    SharedString::from(format!(
+                                                        "{group}-open"
+                                                    )),
+                                                    IconName::File,
+                                                )
+                                                .icon_size(IconSize::Small)
+                                                .tooltip(Tooltip::text(t!("Open File")))
+                                                .on_click(cx.listener(move |this, _, window, cx| {
+                                                    let Some(repository) =
+                                                        this.active_repository.clone()
+                                                    else {
+                                                        return;
+                                                    };
+                                                    let Some(project_path) = repository
+                                                        .read(cx)
+                                                        .repo_path_to_project_path(&open_path, cx)
+                                                    else {
+                                                        return;
+                                                    };
+                                                    this.workspace
+                                                        .update(cx, |workspace, cx| {
+                                                            workspace
+                                                                .open_path_preview(
+                                                                    project_path,
+                                                                    None,
+                                                                    false,
+                                                                    false,
+                                                                    true,
+                                                                    window,
+                                                                    cx,
+                                                                )
+                                                                .detach_and_log_err(cx);
+                                                        })
+                                                        .ok();
+                                                })),
+                                            )
+                                            .child(
+                                                IconButton::new(
+                                                    SharedString::from(format!(
+                                                        "{group}-compare"
+                                                    )),
+                                                    IconName::Diff,
+                                                )
+                                                .icon_size(IconSize::Small)
+                                                .tooltip(Tooltip::text(t!("Open Changes")))
+                                                .on_click({
+                                                    let sha = compare_sha.clone();
+                                                    let repo = compare_repo.clone();
+                                                    let workspace = compare_workspace.clone();
+                                                    let path = compare_path.clone();
+                                                    move |_, window, cx| {
+                                                        CommitView::open_at_file(
+                                                            sha.clone(),
+                                                            repo.clone(),
+                                                            workspace.clone(),
+                                                            path.clone(),
+                                                            window,
+                                                            cx,
+                                                        );
+                                                    }
+                                                }),
+                                            ),
+                                    )
+                                    .child(
+                                        Label::new(status)
+                                            .size(LabelSize::Small)
+                                            .color(Color::Modified),
+                                    ),
+                            )
+                            .on_click({
+                                let path = path.clone();
+                                move |_, window, cx| {
+                                    CommitView::open_at_file(
+                                        sha.clone(),
+                                        repo.clone(),
+                                        workspace.clone(),
+                                        path.clone(),
+                                        window,
+                                        cx,
+                                    );
+                                }
+                            })
+                            .into_any_element()
+                    })
+                    .collect::<Vec<_>>()
+            };
+
+            let conflicts_header = tree_row("merge-conflicts-header".into(), 1)
+                .child(chevron(self.merge_conflicts_expanded))
+                .child(Label::new(conflicts_label).single_line())
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.merge_conflicts_expanded = !this.merge_conflicts_expanded;
+                    cx.notify();
+                }));
+            let conflict_file_rows = self
+                .merge_conflicts_expanded
+                .then(|| {
+                    conflict_entries
+                        .iter()
+                        .enumerate()
+                        .flat_map(|(ix, entry)| {
+                            let file_commits = self
+                                .merge_commits
+                                .get(&entry.repo_path)
+                                .cloned()
+                                .unwrap_or_default();
+                            let section_header = |kind: &'static str,
+                                                  label: SharedString,
+                                                  name: SharedString,
+                                                  expanded: bool,
+                                                  toggle: fn(&mut Self) -> &mut bool| {
+                                let group: SharedString =
+                                    format!("merge-{kind}-header-{ix}").into();
+                                tree_row(group.clone(), 3)
+                                    .group(group.clone())
+                                    .child(chevron(expanded))
+                                    .child(
+                                        Icon::new(IconName::DiffSplit)
+                                            .size(IconSize::Small)
+                                            .color(Color::Muted),
+                                    )
+                                    .child(Label::new(label).single_line())
+                                    .child(
+                                        Label::new(name)
+                                            .size(LabelSize::Small)
+                                            .color(Color::Muted)
+                                            .single_line()
+                                            .truncate(),
+                                    )
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        let flag = toggle(this);
+                                        *flag = !*flag;
+                                        cx.notify();
+                                    }))
+                                    .into_any_element()
+                            };
+                            let mut rows: Vec<AnyElement> = Vec::new();
+                            let group: SharedString = format!("merge-file-{ix}").into();
+                            let name: SharedString = entry.display_name(path_style).into();
+                            let parent: Option<SharedString> =
+                                entry.parent_dir(path_style).map(Into::into);
+                            let open_entry = entry.clone();
+                            let diff_entry = entry.clone();
+                            let file_row = tree_row(group.clone(), 2)
+                                .group(group.clone())
+                                .child(chevron(true))
+                                .child(
+                                    Icon::new(IconName::File)
+                                        .size(IconSize::Small)
+                                        .color(Color::Error),
+                                )
+                                .child(Label::new(name).color(Color::Error).single_line())
+                                .children(parent.map(|parent| {
+                                    Label::new(parent)
+                                        .size(LabelSize::Small)
+                                        .color(Color::Muted)
+                                        .single_line()
+                                        .truncate()
+                                }))
+                                .child(
+                                    h_flex()
+                                        .ml_auto()
+                                        .gap_0p5()
+                                        .invisible()
+                                        .group_hover(group.clone(), |style| style.visible())
+                                        .child(
+                                            IconButton::new(
+                                                SharedString::from(format!("merge-open-{ix}")),
+                                                IconName::File,
+                                            )
+                                            .icon_size(IconSize::Small)
+                                            .tooltip(Tooltip::text(t!("Open File")))
+                                            .on_click(cx.listener({
+                                                let entry = open_entry.clone();
+                                                move |this, _, window, cx| {
+                                                    this.open_files_for_entries(
+                                                        std::slice::from_ref(&entry),
+                                                        window,
+                                                        cx,
+                                                    );
+                                                }
+                                            })),
+                                        )
+                                        .child(
+                                            IconButton::new(
+                                                SharedString::from(format!("merge-diff-{ix}")),
+                                                IconName::Diff,
+                                            )
+                                            .icon_size(IconSize::Small)
+                                            .tooltip(Tooltip::text(t!("Open Changes")))
+                                            .on_click(cx.listener({
+                                                let entry = diff_entry.clone();
+                                                move |this, _, window, cx| {
+                                                    this.workspace
+                                                        .update(cx, |workspace, cx| {
+                                                            ProjectDiff::deploy_at(
+                                                                workspace,
+                                                                Some(entry.clone()),
+                                                                window,
+                                                                cx,
+                                                            );
+                                                        })
+                                                        .ok();
+                                                }
+                                            })),
+                                        ),
+                                )
+                                .child(
+                                    Label::new("!")
+                                        .size(LabelSize::Small)
+                                        .color(Color::Error),
+                                )
+                                .on_click(cx.listener({
+                                    let entry = open_entry.clone();
+                                    move |this, _, window, cx| {
+                                        this.open_files_for_entries(
+                                            std::slice::from_ref(&entry),
+                                            window,
+                                            cx,
+                                        );
+                                    }
+                                }));
+                            rows.push(file_row.into_any_element());
+                            rows.push(section_header(
+                                "current",
+                                t!("Current changes").to_string().into(),
+                                branch_name.clone().unwrap_or_default(),
+                                self.merge_current_expanded,
+                                |this| &mut this.merge_current_expanded,
+                            ));
+                            if self.merge_current_expanded {
+                                rows.extend(commit_rows(
+                                    "current",
+                                    &entry.repo_path,
+                                    &file_commits.current,
+                                ));
+                            }
+                            rows.push(section_header(
+                                "incoming",
+                                t!("Incoming changes").to_string().into(),
+                                incoming.clone(),
+                                self.merge_incoming_expanded,
+                                |this| &mut this.merge_incoming_expanded,
+                            ));
+                            if self.merge_incoming_expanded {
+                                rows.extend(commit_rows(
+                                    "incoming",
+                                    &entry.repo_path,
+                                    &file_commits.incoming,
+                                ));
+                            }
+                            rows
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+
+            v_flex()
+                .w_full()
+                .child(conflicts_header)
+                .children(conflict_file_rows)
+        });
+
         let body = (!collapsed).then(|| {
             v_flex()
                 .flex_1()
                 .min_h_0()
                 .w_full()
                 .overflow_hidden()
+                .children(merge_row)
+                .children(merge_children)
                 .children(sync_row)
                 .child(
                     h_flex()
@@ -7684,12 +8263,72 @@ impl GitPanel {
                 },
             ));
             self._repo_subscriptions
-                .push(cx.observe(&active_repository, |_this, _repo, cx| {
+                .push(cx.observe(&active_repository, |this, _repo, cx| {
+                    this.refresh_merge_commits(cx);
                     cx.notify();
                 }));
         }
 
+        self.refresh_merge_commits(cx);
         self.fetch_commit_history_entries(cx);
+    }
+
+    fn refresh_merge_commits(&mut self, cx: &mut Context<Self>) {
+        let Some(repository) = self.active_repository.clone() else {
+            return;
+        };
+        let (key, paths): (Option<SharedString>, Vec<RepoPath>) = {
+            let repository = repository.read(cx);
+            let paths: Vec<RepoPath> = repository
+                .cached_status()
+                .filter(|entry| entry.status.is_conflicted())
+                .map(|entry| entry.repo_path)
+                .collect();
+            let key = repository.merge.message.as_ref().map(|message| {
+                let head = repository
+                    .head_commit
+                    .as_ref()
+                    .map(|commit| commit.sha.to_string())
+                    .unwrap_or_default();
+                let paths = paths
+                    .iter()
+                    .map(|path| path.as_unix_str().to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                SharedString::from(format!("{message}|{head}|{paths}"))
+            });
+            (key, paths)
+        };
+        if key == self.merge_commits_key {
+            return;
+        }
+        self.merge_commits_key = key.clone();
+        if key.is_none() {
+            self.merge_commits.clear();
+            return;
+        }
+        let receivers: Vec<_> = paths
+            .into_iter()
+            .map(|path| {
+                let receiver = repository.update(cx, |repository, cx| {
+                    repository.merge_commits(path.as_unix_str().to_string(), cx)
+                });
+                (path, receiver)
+            })
+            .collect();
+        self.merge_commits_task = cx.spawn(async move |this, cx| {
+            let mut loaded = HashMap::default();
+            for (path, receiver) in receivers {
+                if let Ok(Ok(commits)) = receiver.await {
+                    loaded.insert(path, commits);
+                }
+            }
+            this.update(cx, |this, cx| {
+                this.merge_commits = loaded;
+                cx.notify();
+            })
+            .ok();
+        });
     }
 
     fn fetch_commit_history_entries(&mut self, cx: &mut Context<Self>) {
@@ -10671,6 +11310,7 @@ impl Render for GitPanel {
             .on_action(cx.listener(Self::view_staged_changes))
             .on_action(cx.listener(Self::focus_changes_list))
             .on_action(cx.listener(Self::focus_editor))
+            .on_action(cx.listener(Self::focus_commit_button))
             .on_action(cx.listener(Self::expand_commit_editor))
             .on_action(cx.listener(Self::set_sort_by_path))
             .on_action(cx.listener(Self::set_sort_by_name))
