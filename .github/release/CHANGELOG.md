@@ -4,7 +4,7 @@ All notable user-facing changes to Crab are listed here, newest first.
 
 ## Unreleased
 
-## 1.0.3 - 2026-11-26
+## 1.0.4 - 2026-11-26
 
 - Git panel, Source Control, diff views and Search follow the VS Code layout.
 - Debug panel sections are ordered Variables, Watch, Frames, Breakpoints. They can be collapsed, resized and dragged to reorder or merge.

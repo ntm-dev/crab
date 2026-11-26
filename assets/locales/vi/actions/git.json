@@ -62,9 +62,21 @@
     "name": "Tạo kho lưu trữ từ xa",
     "description": "Tạo remote Git."
   },
+  "git::CreateTag": {
+    "name": "Tạo tag",
+    "description": "Tạo tag Git."
+  },
   "git::CreateWorktree": {
     "name": "Tạo worktree",
     "description": "Tạo worktree Git mới và chuyển không gian làm việc sang worktree đó. Kích hoạt khi chọn mục \"Tạo worktree mới\" trong bộ chọn worktree hợp nhất."
+  },
+  "git::DeleteBranch": {
+    "name": "Xóa nhánh",
+    "description": "Xóa nhánh Git."
+  },
+  "git::DeleteTag": {
+    "name": "Xóa tag",
+    "description": "Xóa tag Git."
   },
   "git::Diff": {
     "name": "Xem khác biệt",
@@ -154,9 +166,17 @@
     "name": "Push",
     "description": "Push các commit lên kho lưu trữ từ xa."
   },
+  "git::PushTags": {
+    "name": "Push tag",
+    "description": "Push các tag lên kho lưu trữ từ xa."
+  },
   "git::PushTo": {
     "name": "Push tới remote chỉ định",
     "description": "Push các commit tới remote được chỉ định."
+  },
+  "git::RemoveRemote": {
+    "name": "Xóa kho lưu trữ từ xa",
+    "description": "Xóa remote Git."
   },
   "git::RenameBranch": {
     "name": "Đổi tên nhánh",
