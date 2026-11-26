@@ -3127,7 +3127,7 @@ impl ProjectPanel {
                     name = MarkdownInlineCode(&file_name)
                 );
                 Some(window.prompt(
-                    PromptLevel::Info,
+                    PromptLevel::Warning,
                     &prompt,
                     None,
                     &[
@@ -3436,7 +3436,7 @@ impl ProjectPanel {
                 let prompt = Self::build_removal_prompt(removal_kind, &names, dirty_buffers);
 
                 Some(window.prompt(
-                    PromptLevel::Info,
+                    PromptLevel::Warning,
                     &prompt.message,
                     Some(&prompt.detail),
                     &[
@@ -5616,7 +5616,7 @@ impl ProjectPanel {
                     let answer = cx
                         .update(|window, cx| {
                             window.prompt(
-                                PromptLevel::Info,
+                                PromptLevel::Warning,
                                 &prompt_message,
                                 None,
                                 &[

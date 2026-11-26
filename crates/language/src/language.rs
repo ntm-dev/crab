@@ -88,7 +88,7 @@ pub use task_context::{ContextLocation, ContextProvider};
 pub use text_diff::{
     DiffOptions, apply_diff_patch, apply_reversed_diff_patch, char_diff, line_diff, text_diff,
     text_diff_with_options, unified_diff, unified_diff_with_context, unified_diff_with_offsets,
-    word_diff_ranges,
+    word_diff_ranges, word_diff_ranges_marking_deletions,
 };
 use theme::SyntaxTheme;
 pub use toolchain::{

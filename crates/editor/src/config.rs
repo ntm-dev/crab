@@ -202,6 +202,11 @@ impl Editor {
         cx.notify();
     }
 
+    pub fn set_show_invisibles_outside_full_mode(&mut self, show: bool, cx: &mut Context<Self>) {
+        self.show_invisibles_outside_full_mode = show;
+        cx.notify();
+    }
+
     pub fn set_show_line_numbers(&mut self, show_line_numbers: bool, cx: &mut Context<Self>) {
         self.show_line_numbers = Some(show_line_numbers);
         cx.notify();

@@ -996,7 +996,7 @@ impl Inner {
             .panel
             .update_in(cx, |_panel, window, cx| {
                 window.prompt(
-                    PromptLevel::Info,
+                    PromptLevel::Warning,
                     &prompt.message,
                     Some(&prompt.detail),
                     &[

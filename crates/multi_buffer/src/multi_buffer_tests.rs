@@ -6070,9 +6070,60 @@ async fn test_word_diff_modified_lines_with_deletion_between(cx: &mut TestAppCon
 
     assert_eq!(
         word_diffs,
-        Vec::<String>::new(),
-        "modified lines with a deleted line between should not produce word diffs"
+        vec!["bbb", "deleted line", "ddd", "BBB", "DDD"],
+        "modified lines should be paired with their counterparts and the deleted line emphasized"
     );
+}
+
+#[gpui::test]
+async fn test_word_diff_removed_line_before_modified_line(cx: &mut TestAppContext) {
+    let settings_store = cx.update(|cx| SettingsStore::test(cx));
+    cx.set_global(settings_store);
+
+    let base_text = "unrelated command --flag\necho failed, retrying\n";
+    let modified_text = "echo , retrying\n";
+
+    let word_diffs = collect_word_diffs(base_text, modified_text, cx);
+
+    assert_eq!(
+        word_diffs,
+        vec!["unrelated command --flag", "failed", ""],
+        "the removal is also marked on the new line by an empty range at the removal point"
+    );
+}
+
+#[gpui::test]
+async fn test_word_diff_indented_removed_line_before_modified_line(cx: &mut TestAppContext) {
+    let settings_store = cx.update(|cx| SettingsStore::test(cx));
+    cx.set_global(settings_store);
+
+    let base_text = "    for i in 1 2 3 4 5; do \\\n      COMPOSER_MAX_PARALLEL_HTTP=1 /usr/bin/composer install --optimize-autoloader \\\n      echo \"composer install attempt $i failed, retrying in ${RETRY_SLEEP}s...\"; \\\n      sleep 1; \\\n";
+    let modified_text = "    for i in 1 2 3 4 5; do \\\n      echo \"composer install attempt $i , retrying in ${RETRY_SLEEP}s...\"; \\\n      sleep 1; \\\n";
+
+    let word_diffs = collect_word_diffs(base_text, modified_text, cx);
+
+    assert_eq!(
+        word_diffs,
+        vec![
+            "      COMPOSER_MAX_PARALLEL_HTTP=1 /usr/bin/composer install --optimize-autoloader \\",
+            "failed",
+            ""
+        ],
+        "the removed line is emphasized up to its line end and never spills into the next line"
+    );
+}
+
+#[gpui::test]
+async fn test_word_diff_unrelated_lines_with_different_counts(cx: &mut TestAppContext) {
+    let settings_store = cx.update(|cx| SettingsStore::test(cx));
+    cx.set_global(settings_store);
+
+    let base_text = "first old line\nsecond old line\n";
+    let modified_text = "completely different\n";
+
+    let word_diffs = collect_word_diffs(base_text, modified_text, cx);
+
+    assert_eq!(word_diffs, Vec::<String>::new());
 }
 
 #[gpui::test]

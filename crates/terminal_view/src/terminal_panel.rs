@@ -95,7 +95,6 @@ pub struct TerminalPanel {
     pending_split_source: Option<EntityId>,
     terminal_list_width: Option<Pixels>,
     list_width_before_fit: Option<Option<Pixels>>,
-    maximized_from: Option<Pixels>,
     show_problems: bool,
     problems_view: Option<Entity<diagnostics::ProblemsTable>>,
     debug_console_view: Option<AnyView>,
@@ -259,7 +258,6 @@ impl TerminalPanel {
             pending_split_source: None,
             terminal_list_width: None,
             list_width_before_fit: None,
-            maximized_from: None,
             show_problems: false,
             problems_view: None,
             debug_console_view: None,
@@ -2555,23 +2553,9 @@ impl TerminalPanel {
         let Some(workspace) = self.workspace.upgrade() else {
             return;
         };
-        let dock = workspace.read(cx).bottom_dock().clone();
-        let new_size = if let Some(previous) = self.maximized_from.take() {
-            previous
-        } else {
-            let current = dock
-                .read(cx)
-                .active_panel_size()
-                .and_then(|state| state.size)
-                .unwrap_or(px(300.));
-            let chrome = ui::utils::platform_title_bar_height(window) + px(22. + 8. + 2.);
-            self.maximized_from = Some(current);
-            window.viewport_size().height - chrome
-        };
-        window.defer(cx, move |window, cx| {
-            dock.update(cx, |dock, cx| {
-                dock.resize_panel_sizes(Some(new_size), None, window, cx);
-            });
+        workspace.update(cx, |workspace, cx| {
+            let maximized = !workspace.is_bottom_dock_maximized();
+            workspace.set_bottom_dock_maximized(maximized, cx);
         });
         cx.notify();
     }
@@ -2581,7 +2565,11 @@ impl TerminalPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
-        let maximized = self.maximized_from.is_some();
+        let maximized = self.position(window, cx) == DockPosition::Bottom
+            && self
+                .workspace
+                .upgrade()
+                .is_some_and(|workspace| workspace.read(cx).is_bottom_dock_maximized());
         let showing_output = self.show_output && self.output_view.is_some();
         let showing_problems = self.show_problems;
         let showing_debug = self.show_debug_console && self.debug_console_view.is_some();

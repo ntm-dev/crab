@@ -1974,6 +1974,8 @@ pub fn render_diff_hunk_controls(
         .into_any_element()
 }
 
+const GIT_PEEK_MAX_LINES: u32 = 7;
+
 pub(super) struct GitPeek {
     block_id: CustomBlockId,
     hunk_start: Anchor,
@@ -1991,6 +1993,7 @@ impl Editor {
     pub fn toggle_git_peek(
         &mut self,
         hunk_start: Anchor,
+        focus: Anchor,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -2003,13 +2006,14 @@ impl Editor {
         if same {
             self.close_git_peek(cx);
         } else {
-            self.open_git_peek(hunk_start, window, cx);
+            self.open_git_peek(hunk_start, focus, window, cx);
         }
     }
 
     pub fn open_git_peek(
         &mut self,
         hunk_start: Anchor,
+        focus: Anchor,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -2042,9 +2046,19 @@ impl Editor {
             .to_string();
         let stage = hunk.status.has_secondary_hunk();
 
+        let whole_file_context_lines = buffer.read(cx).max_point().row;
+        let focus_point = snapshot
+            .point_to_buffer_point(focus.to_point(&snapshot))
+            .map(|(_, point)| Point::new(point.row, 0))
+            .unwrap_or_else(|| Point::new(buffer_range.start.row, 0));
         let peek_multibuffer = cx.new(|cx| {
             let mut multibuffer = MultiBuffer::without_headers(Capability::ReadOnly);
-            multibuffer.set_excerpts_for_buffer(buffer.clone(), vec![buffer_range], 3, cx);
+            multibuffer.set_excerpts_for_buffer(
+                buffer.clone(),
+                vec![buffer_range],
+                whole_file_context_lines,
+                cx,
+            );
             multibuffer.add_diff(diff, cx);
             multibuffer.set_all_diff_hunks_expanded(cx);
             multibuffer
@@ -2053,7 +2067,7 @@ impl Editor {
             let mut editor = Editor::new(
                 EditorMode::AutoHeight {
                     min_lines: 1,
-                    max_lines: None,
+                    max_lines: Some(GIT_PEEK_MAX_LINES as usize),
                 },
                 peek_multibuffer,
                 None,
@@ -2061,6 +2075,10 @@ impl Editor {
                 cx,
             );
             editor.set_read_only(true);
+            editor.set_soft_wrap_mode(language_settings::SoftWrap::None, cx);
+            editor.set_show_invisibles_outside_full_mode(true, cx);
+            editor.set_show_vertical_scrollbar(true, cx);
+            editor.set_show_horizontal_scrollbar(true, cx);
             editor.set_show_breakpoints(false, cx);
             editor.set_show_code_actions(false, cx);
             editor.set_show_runnables(false, cx);
@@ -2072,7 +2090,13 @@ impl Editor {
             editor
         });
         let lines = peek_editor.update(cx, |editor, cx| {
-            editor.snapshot(window, cx).max_point().row().0 + 1
+            editor.change_selections(
+                SelectionEffects::scroll(Autoscroll::center()),
+                window,
+                cx,
+                |selections| selections.select_ranges([focus_point..focus_point]),
+            );
+            (editor.snapshot(window, cx).max_point().row().0 + 1).min(GIT_PEEK_MAX_LINES)
         });
 
         let target_row = if hunk.row_range.end.0 > hunk.row_range.start.0 {
@@ -2089,9 +2113,17 @@ impl Editor {
         .to_string();
         let editor_handle = cx.entity();
         let start = hunk.multi_buffer_range.start;
+        let border_color = {
+            let status = cx.theme().status();
+            match hunk.status.kind {
+                DiffHunkStatusKind::Added => status.created,
+                DiffHunkStatusKind::Modified => status.modified,
+                DiffHunkStatusKind::Deleted => status.deleted,
+            }
+        };
         let block_id = self.insert_blocks(
             [BlockProperties {
-                style: BlockStyle::Flex,
+                style: BlockStyle::Sticky,
                 placement: BlockPlacement::Below(anchor),
                 height: Some(lines + 1),
                 render: Arc::new(move |cx: &mut BlockContext| {
@@ -2102,6 +2134,7 @@ impl Editor {
                         &title,
                         start,
                         stage,
+                        border_color,
                         cx,
                     )
                 }),
@@ -2129,7 +2162,7 @@ impl Editor {
         let point = from.to_point(&snapshot.buffer_snapshot());
         self.go_to_hunk_before_or_after_position(&snapshot, point, direction, true, window, cx);
         let head = self.selections.newest_anchor().head();
-        self.open_git_peek(head, window, cx);
+        self.open_git_peek(head, head, window, cx);
     }
 }
 
@@ -2140,6 +2173,7 @@ fn render_git_peek(
     title: &str,
     hunk_start: Anchor,
     stage: bool,
+    border_color: gpui::Hsla,
     cx: &mut BlockContext,
 ) -> AnyElement {
     let colors = cx.theme().colors();
@@ -2162,32 +2196,37 @@ fn render_git_peek(
             .tooltip(Tooltip::text(tooltip))
     };
 
-    v_flex()
+    let frame = v_flex()
         .w_full()
         .block_mouse_except_scroll()
         .border_y_1()
-        .border_color(colors.border_focused)
+        .border_color(border_color)
         .bg(colors.editor_background)
         .child(
             h_flex()
                 .h(line_height)
                 .pl_2()
-                .pr(cx.margins.right + gpui::px(8.))
+                .pr(gpui::px(8.))
                 .gap_2()
                 .justify_between()
+                .overflow_x_hidden()
                 .child(
                     h_flex()
                         .gap_2()
+                        .min_w_0()
+                        .overflow_x_hidden()
                         .child(Label::new(file_name.to_string()).size(LabelSize::Small))
                         .child(
                             Label::new(title.to_string())
                                 .size(LabelSize::Small)
-                                .color(Color::Muted),
+                                .color(Color::Muted)
+                                .truncate(),
                         ),
                 )
                 .child(
                     h_flex()
                         .gap_1()
+                        .flex_none()
                         .child(
                             button(
                                 "git-peek-stage",
@@ -2284,7 +2323,12 @@ fn render_git_peek(
                 .border_t_1()
                 .border_color(colors.border_variant)
                 .child(EditorElement::new(peek_editor, peek_style)),
-        )
+        );
+
+    div()
+        .w_full()
+        .pr(cx.margins.right)
+        .child(frame)
         .into_any_element()
 }
 

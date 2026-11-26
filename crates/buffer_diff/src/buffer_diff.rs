@@ -2,7 +2,7 @@ use gpui::{App, AppContext as _, Context, Entity, EventEmitter, Task};
 use imara_diff::{Algorithm, Diff, InternedInput, sources::lines};
 use language::{
     Capability, DiffOptions, Language, LanguageName, LanguageRegistry,
-    language_settings::LanguageSettings, word_diff_ranges,
+    language_settings::LanguageSettings, word_diff_ranges_marking_deletions,
 };
 use rope::Rope;
 use std::{
@@ -1280,6 +1280,112 @@ fn compute_hunks(
 
     tree
 }
+fn paired_line_word_diffs(
+    base_text: &str,
+    buffer_text: &str,
+    options: &DiffOptions,
+) -> (Vec<Range<usize>>, Vec<Range<usize>>) {
+    const MIN_LINE_SIMILARITY: f32 = 0.5;
+
+    fn line_ranges(text: &str) -> Vec<Range<usize>> {
+        let mut offset = 0;
+        text.split_inclusive('\n')
+            .map(|line| {
+                let start = offset;
+                offset += line.len();
+                start..start + line.trim_end_matches('\n').len()
+            })
+            .collect()
+    }
+
+    let base_lines = line_ranges(base_text);
+    let mut base_word_diffs = Vec::new();
+    let mut buffer_word_diffs = Vec::new();
+    let mut next_base_line = 0;
+
+    let buffer_lines = line_ranges(buffer_text);
+    let mut is_base_line_paired = vec![false; base_lines.len()];
+    let mut is_buffer_line_paired = vec![false; buffer_lines.len()];
+
+    for (buffer_index, buffer_line) in buffer_lines.iter().enumerate() {
+        let Some(buffer_line_text) = buffer_text.get(buffer_line.clone()) else {
+            continue;
+        };
+        let mut best_match: Option<(usize, f32, Vec<Range<usize>>, Vec<Range<usize>>)> = None;
+        for (base_index, base_line) in base_lines.iter().enumerate().skip(next_base_line) {
+            let Some(base_line_text) = base_text.get(base_line.clone()) else {
+                continue;
+            };
+            let total_len = base_line_text.len() + buffer_line_text.len();
+            if total_len == 0 {
+                continue;
+            }
+            let (base_ranges, buffer_ranges) = word_diff_ranges_marking_deletions(
+                base_line_text,
+                buffer_line_text,
+                DiffOptions {
+                    language_scope: options.language_scope.clone(),
+                    ..*options
+                },
+            );
+            let changed_len: usize = base_ranges
+                .iter()
+                .chain(&buffer_ranges)
+                .map(|range| range.len())
+                .sum();
+            let similarity = 1.0 - changed_len as f32 / total_len as f32;
+            if similarity >= MIN_LINE_SIMILARITY
+                && best_match
+                    .as_ref()
+                    .is_none_or(|(_, best_similarity, _, _)| similarity > *best_similarity)
+            {
+                best_match = Some((base_index, similarity, base_ranges, buffer_ranges));
+            }
+        }
+
+        let Some((base_index, _, base_ranges, buffer_ranges)) = best_match else {
+            continue;
+        };
+        let Some(base_line) = base_lines.get(base_index) else {
+            continue;
+        };
+        base_word_diffs.extend(
+            base_ranges
+                .into_iter()
+                .map(|range| base_line.start + range.start..base_line.start + range.end),
+        );
+        buffer_word_diffs.extend(
+            buffer_ranges
+                .into_iter()
+                .map(|range| buffer_line.start + range.start..buffer_line.start + range.end),
+        );
+        next_base_line = base_index + 1;
+        if let Some(is_paired) = is_base_line_paired.get_mut(base_index) {
+            *is_paired = true;
+        }
+        if let Some(is_paired) = is_buffer_line_paired.get_mut(buffer_index) {
+            *is_paired = true;
+        }
+    }
+
+    if is_base_line_paired.contains(&true) {
+        let unpaired_ranges = |lines: &[Range<usize>], is_paired: &[bool]| {
+            lines
+                .iter()
+                .zip(is_paired)
+                .filter(|(line, is_paired)| !**is_paired && !line.is_empty())
+                .map(|(line, _)| line.clone())
+                .collect::<Vec<_>>()
+        };
+        base_word_diffs.extend(unpaired_ranges(&base_lines, &is_base_line_paired));
+        buffer_word_diffs.extend(unpaired_ranges(&buffer_lines, &is_buffer_line_paired));
+        base_word_diffs.sort_by_key(|range| range.start);
+        buffer_word_diffs.sort_by_key(|range| range.start);
+    }
+
+    (base_word_diffs, buffer_word_diffs)
+}
+
 struct HunkSink<'a> {
     diff_base_rope: &'a Rope,
     buffer: &'a text::BufferSnapshot,
@@ -1336,8 +1442,8 @@ impl HunkSink<'_> {
 
         let (base_word_diffs, buffer_word_diffs) = if let Some(diff_options) = self.diff_options
             && !buffer_row_range.is_empty()
-            && base_line_count == buffer_line_count
-            && diff_options.max_word_diff_line_count >= base_line_count
+            && base_line_count > 0
+            && diff_options.max_word_diff_line_count >= base_line_count.max(buffer_line_count)
         {
             let base_text: String = self
                 .diff_base_rope
@@ -1345,14 +1451,19 @@ impl HunkSink<'_> {
                 .collect();
             let buffer_text: String = self.buffer.text_for_range(buffer_range.clone()).collect();
 
-            let (base_word_diffs, buffer_word_diffs_relative) = word_diff_ranges(
-                &base_text,
-                &buffer_text,
-                DiffOptions {
-                    language_scope: diff_options.language_scope.clone(),
-                    ..*diff_options
-                },
-            );
+            let (base_word_diffs, buffer_word_diffs_relative) =
+                if base_line_count == buffer_line_count {
+                    word_diff_ranges_marking_deletions(
+                        &base_text,
+                        &buffer_text,
+                        DiffOptions {
+                            language_scope: diff_options.language_scope.clone(),
+                            ..*diff_options
+                        },
+                    )
+                } else {
+                    paired_line_word_diffs(&base_text, &buffer_text, diff_options)
+                };
 
             let buffer_start_offset = buffer_range.start.to_offset(self.buffer);
             let buffer_word_diffs = buffer_word_diffs_relative

@@ -1511,7 +1511,7 @@ fn quit(_: &Quit, cx: &mut App) {
             let answer = multi_workspace
                 .update(cx, |_, window, cx| {
                     window.prompt(
-                        PromptLevel::Info,
+                        PromptLevel::Warning,
                         &t!("Are you sure you want to quit?"),
                         None,
                         &[

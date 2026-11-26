@@ -411,7 +411,7 @@ pub async fn handle_import_vscode_settings(
             Err(err) => {
                 zlog::error!("{err:?}");
                 let _ = cx.prompt(
-                    gpui::PromptLevel::Info,
+                    gpui::PromptLevel::Warning,
                     &t!(
                         "Could not find or load a {source} settings file",
                         source = source

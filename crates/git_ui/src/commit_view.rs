@@ -1156,7 +1156,7 @@ impl CommitView {
         };
         let sha = commit_view.read(cx).commit.sha.clone();
         let answer = window.prompt(
-            PromptLevel::Info,
+            PromptLevel::Warning,
             &prompt_message(format!("stash@{{{stash}}}")),
             None,
             &[

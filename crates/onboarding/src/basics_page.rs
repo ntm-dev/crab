@@ -17,11 +17,13 @@ use crate::{
     theme_preview::{ThemePreviewStyle, ThemePreviewTile},
 };
 
-const LIGHT_THEMES: [&str; 3] = ["Crab Light", "Catppuccin Latte", "One Light"];
-const DARK_THEMES: [&str; 3] = ["Crab Dark", "Catppuccin Mocha", "One Dark"];
+// Panda Crab has no light variant; its light slot only pairs with it for the system-mode preview and is not offered in Light mode.
+const LIGHT_THEMES: [&str; 3] = ["Crab Light", "Crab Light", "One Light"];
+const DARK_THEMES: [&str; 3] = ["Crab Dark", "Panda Crab", "One Dark"];
+const PANDA_FAMILY_INDEX: usize = 1;
 const FAMILY_NAMES: [SharedString; 3] = [
     SharedString::new_static("Crab"),
-    SharedString::new_static("Catppuccin"),
+    SharedString::new_static("Panda Crab"),
     SharedString::new_static("One"),
 ];
 
@@ -88,7 +90,7 @@ fn render_theme_section(tab_index: &mut isize, cx: &mut App) -> impl IntoElement
         tab_index: &mut isize,
         theme_selection: &ThemeSelection,
         cx: &mut App,
-    ) -> [impl IntoElement; 3] {
+    ) -> Vec<AnyElement> {
         let system_appearance = SystemAppearance::global(cx);
         let theme_registry = ThemeRegistry::global(cx);
 
@@ -113,7 +115,12 @@ fn render_theme_section(tab_index: &mut isize, cx: &mut App) -> impl IntoElement
 
         let themes = theme_names.map(|theme| theme_registry.get(theme).unwrap());
 
-        [0, 1, 2].map(|index| {
+        let hide_panda = theme_mode == ThemeAppearanceMode::Light
+            || (theme_mode == ThemeAppearanceMode::System && appearance == Appearance::Light);
+
+        (0..themes.len())
+            .filter(|index| !(hide_panda && *index == PANDA_FAMILY_INDEX))
+            .map(|index| {
             let theme = &themes[index];
             let is_selected = theme.name == current_theme_name;
             let name = theme.name.clone();
@@ -176,7 +183,9 @@ fn render_theme_section(tab_index: &mut isize, cx: &mut App) -> impl IntoElement
                         .color(Color::Muted)
                         .size(LabelSize::Small),
                 )
+                .into_any_element()
         })
+        .collect()
     }
 
     fn write_mode_change(mode: ThemeAppearanceMode, cx: &mut App) {

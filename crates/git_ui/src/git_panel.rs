@@ -184,7 +184,7 @@ fn prompt<T: PromptChoice>(
     window: &mut Window,
     cx: &mut App,
 ) -> Task<anyhow::Result<T>> {
-    let rx = window.prompt(PromptLevel::Info, msg, detail, &T::buttons(), cx);
+    let rx = window.prompt(PromptLevel::Warning, msg, detail, &T::buttons(), cx);
     cx.spawn(async move |_| Ok(T::iter().nth(rx.await?).unwrap()))
 }
 

@@ -183,6 +183,23 @@ pub fn word_diff_ranges(
     new_text: &str,
     options: DiffOptions,
 ) -> (Vec<Range<usize>>, Vec<Range<usize>>) {
+    word_diff_ranges_impl(old_text, new_text, options, false)
+}
+
+pub fn word_diff_ranges_marking_deletions(
+    old_text: &str,
+    new_text: &str,
+    options: DiffOptions,
+) -> (Vec<Range<usize>>, Vec<Range<usize>>) {
+    word_diff_ranges_impl(old_text, new_text, options, true)
+}
+
+fn word_diff_ranges_impl(
+    old_text: &str,
+    new_text: &str,
+    options: DiffOptions,
+    mark_deletions: bool,
+) -> (Vec<Range<usize>>, Vec<Range<usize>>) {
     let mut input: InternedInput<&str> = InternedInput::default();
     input.update_before(tokenize(old_text, options.language_scope.clone()));
     input.update_after(tokenize(new_text, options.language_scope));
@@ -191,6 +208,10 @@ pub fn word_diff_ranges(
     let mut new_ranges: Vec<Range<usize>> = Vec::new();
 
     diff_internal(&input, &mut |old_byte_range, new_byte_range, _, _| {
+        if mark_deletions && new_byte_range.is_empty() {
+            new_ranges.push(new_byte_range.clone());
+        }
+
         if !old_byte_range.is_empty() {
             if let Some(last) = old_ranges.last_mut()
                 && last.end >= old_byte_range.start

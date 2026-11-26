@@ -2201,12 +2201,16 @@ impl EditorElement {
             ..Default::default()
         };
 
-        let Some((buffer_id, blame_entry)) = blame
+        let Some((buffer_id, mut blame_entry)) = blame
             .update(cx, |blame, cx| blame.blame_for_rows(&[row_info], cx).next())
             .flatten()
         else {
             return;
         };
+
+        let row_offset = buffer_point.row.saturating_sub(blame_entry.range.start);
+        blame_entry.original_line_number += row_offset;
+        blame_entry.range = buffer_point.row..buffer_point.row + 1;
 
         let Some((popover_state, target_point)) = self.editor.read_with(cx, |editor, _| {
             editor
@@ -3151,7 +3155,7 @@ impl EditorElement {
                 style,
                 MAX_LINE_LEN,
                 rows.len(),
-                &snapshot.mode,
+                snapshot.shows_invisibles(),
                 editor_width,
                 is_row_soft_wrapped,
                 bg_segments_per_row,
@@ -4572,6 +4576,7 @@ impl EditorElement {
         start_row: DisplayRow,
         snapshot: &EditorSnapshot,
         highlighted_ranges: &mut Vec<(Range<DisplayPoint>, Hsla)>,
+        word_diff_markers: &mut Vec<(DisplayPoint, Hsla)>,
         cx: &mut App,
     ) {
         let colors = cx.theme().colors();
@@ -4594,7 +4599,13 @@ impl EditorElement {
                 _ => None,
             })
             .flatten()
-            .filter(|word_diff| word_diff.start < visible_end && word_diff.end > visible_start)
+            .filter(|word_diff| {
+                if word_diff.is_empty() {
+                    word_diff.start >= visible_start && word_diff.start <= visible_end
+                } else {
+                    word_diff.start < visible_end && word_diff.end > visible_start
+                }
+            })
             .collect();
 
         // The converter walks each display-map layer with a forward-only cursor,
@@ -4604,7 +4615,21 @@ impl EditorElement {
 
         let mut converter = snapshot.display_snapshot.display_point_converter();
         for word_diff in visible_word_diffs {
-            for range in converter.map(word_diff.start..word_diff.end) {
+            let is_marker = word_diff.is_empty();
+            let range_to_map = if is_marker {
+                let Some(next_char_len) = snapshot
+                    .buffer_snapshot()
+                    .chars_at(word_diff.start)
+                    .next()
+                    .map(char::len_utf8)
+                else {
+                    continue;
+                };
+                word_diff.start..word_diff.start + next_char_len
+            } else {
+                word_diff.start..word_diff.end
+            };
+            for range in converter.map(range_to_map) {
                 let start_row_offset = range.start.row().0.saturating_sub(start_row.0) as usize;
 
                 let Some(diff_status) = row_infos
@@ -4623,7 +4648,11 @@ impl EditorElement {
                     }
                 };
 
-                highlighted_ranges.push((range, background_color));
+                if is_marker {
+                    word_diff_markers.push((range.start, background_color));
+                } else {
+                    highlighted_ranges.push((range, background_color));
+                }
             }
         }
     }
@@ -5791,6 +5820,10 @@ impl EditorElement {
                 );
             }
 
+            for (position, color) in &layout.word_diff_markers {
+                self.paint_word_diff_marker(*position, *color, layout, window);
+            }
+
             let corner_radius = if EditorSettings::get_global(cx).rounded_selection {
                 0.15 * layout.position_map.line_height
             } else {
@@ -6389,6 +6422,49 @@ impl EditorElement {
                     Ok(())
                 }));
         });
+    }
+
+    fn paint_word_diff_marker(
+        &self,
+        position: DisplayPoint,
+        color: Hsla,
+        layout: &EditorLayout,
+        window: &mut Window,
+    ) {
+        let start_row = layout.visible_display_row_range.start;
+        let row = position.row();
+        if row < start_row || row >= layout.visible_display_row_range.end {
+            return;
+        }
+        let Some(line_layout) = layout
+            .position_map
+            .line_layouts
+            .get(row.minus(start_row) as usize)
+        else {
+            return;
+        };
+        let alignment_offset =
+            line_layout.alignment_offset(layout.text_align, layout.content_width);
+        let line_height = layout.position_map.line_height;
+        let x = layout.content_origin.x
+            + Pixels::from(
+                ScrollPixelOffset::from(
+                    line_layout.x_for_index(position.column() as usize) + alignment_offset,
+                ) - layout.position_map.scroll_pixel_position.x,
+            );
+        let y = layout.content_origin.y
+            + Pixels::from(
+                (row.as_f64() - layout.position_map.scroll_position.y)
+                    * ScrollOffset::from(line_height),
+            );
+        let marker_width = px(2.);
+        window.paint_quad(fill(
+            Bounds::new(
+                point(x - marker_width / 2., y),
+                size(marker_width, line_height),
+            ),
+            color,
+        ));
     }
 
     fn paint_highlighted_range(
@@ -7247,7 +7323,7 @@ impl LineWithInvisibles {
         editor_style: &EditorStyle,
         max_line_len: usize,
         max_line_count: usize,
-        editor_mode: &EditorMode,
+        show_invisibles: bool,
         text_width: Pixels,
         is_row_soft_wrapped: impl Copy + Fn(usize) -> bool,
         bg_segments_per_row: &[Vec<(Range<DisplayPoint>, Hsla)>],
@@ -7467,7 +7543,7 @@ impl LineWithInvisibles {
                             ));
                         }
 
-                        if editor_mode.is_full() && !highlighted_chunk.is_inlay {
+                        if show_invisibles && !highlighted_chunk.is_inlay {
                             // Line wrap pads its contents with fake whitespaces,
                             // avoid printing them
                             let is_soft_wrapped = is_row_soft_wrapped(row);
@@ -8918,12 +8994,14 @@ impl Element for EditorElement {
                         cx,
                     );
 
+                    let mut word_diff_markers = Vec::new();
                     Self::layout_word_diff_highlights(
                         &display_hunks,
                         &row_infos,
                         start_row,
                         &snapshot,
                         &mut highlighted_ranges,
+                        &mut word_diff_markers,
                         cx,
                     );
 
@@ -9757,6 +9835,7 @@ impl Element for EditorElement {
                         active_rows,
                         highlighted_rows,
                         highlighted_ranges,
+                        word_diff_markers,
                         highlighted_gutter_ranges,
                         redacted_ranges,
                         document_colors,
@@ -9984,6 +10063,7 @@ pub struct EditorLayout {
     blocks: Vec<BlockLayout>,
     spacer_blocks: Vec<BlockLayout>,
     highlighted_ranges: Vec<(Range<DisplayPoint>, Hsla)>,
+    word_diff_markers: Vec<(DisplayPoint, Hsla)>,
     highlighted_gutter_ranges: Vec<(Range<DisplayPoint>, Hsla)>,
     redacted_ranges: Vec<Range<DisplayPoint>>,
     cursors: Vec<(DisplayPoint, Hsla)>,
@@ -10631,7 +10711,7 @@ pub fn layout_line(
         style,
         MAX_LINE_LEN,
         1,
-        &snapshot.mode,
+        snapshot.shows_invisibles(),
         text_width,
         is_row_soft_wrapped,
         &[],
@@ -11073,8 +11153,17 @@ fn compute_auto_height_layout(
     let overscroll = size(em_width, px(0.));
 
     let editor_width = text_width - gutter_dimensions.margin - overscroll.width - em_width;
-    let wrap_width = calculate_wrap_width(editor.soft_wrap_mode(cx), editor_width, em_width)
-        .map(|width| width.min(editor_width));
+    let soft_wrap = editor.soft_wrap_mode(cx);
+    let never_wraps_at_viewport =
+        matches!(soft_wrap, SoftWrap::None) && editor.soft_wrap_mode_override.is_some();
+    let wrap_width =
+        calculate_wrap_width(soft_wrap, editor_width, em_width).map(|width| {
+            if never_wraps_at_viewport {
+                width
+            } else {
+                width.min(editor_width)
+            }
+        });
     if wrap_width.is_some() && editor.set_wrap_width(wrap_width, cx) {
         snapshot = editor.snapshot(window, cx);
     }
@@ -12789,7 +12878,7 @@ mod tests {
                     &style,
                     max_line_len,
                     1,
-                    &editor_mode,
+                    editor_mode.is_full(),
                     px(500.),
                     |_| false,
                     &[],

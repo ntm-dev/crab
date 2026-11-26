@@ -983,6 +983,7 @@ pub struct Editor {
     enable_code_lens: bool,
     enable_mouse_wheel_zoom: bool,
     search_results_hold: Option<SearchResultsHold>,
+    show_invisibles_outside_full_mode: bool,
     show_line_numbers: Option<bool>,
     use_relative_line_numbers: Option<bool>,
     show_git_diff_gutter: Option<bool>,
@@ -1194,6 +1195,7 @@ pub struct EditorSnapshot {
     show_gutter: bool,
     offset_content: bool,
     sticky_line_number_digits: usize,
+    show_invisibles_outside_full_mode: bool,
     show_line_numbers: Option<bool>,
     number_deleted_lines: bool,
     show_git_diff_gutter: Option<bool>,
@@ -2305,6 +2307,7 @@ impl Editor {
             breadcrumbs_visibility: BreadcrumbsVisibility::from_settings(cx),
             show_gutter: full_mode,
             search_results_hold: None,
+            show_invisibles_outside_full_mode: false,
             show_line_numbers: (!full_mode).then_some(false),
             use_relative_line_numbers: None,
             disable_expand_excerpt_buttons: !full_mode,
@@ -2997,6 +3000,7 @@ impl Editor {
             sticky_line_number_digits: self
                 .search_results_hold
                 .map_or(0, |hold| hold.min_line_number_digits),
+            show_invisibles_outside_full_mode: self.show_invisibles_outside_full_mode,
             show_line_numbers: self.show_line_numbers,
             number_deleted_lines: self.number_deleted_lines,
             show_git_diff_gutter: self.show_git_diff_gutter,
@@ -11682,6 +11686,10 @@ fn ending_row(next_selection: &Selection<Point>, display_map: &DisplaySnapshot) 
 }
 
 impl EditorSnapshot {
+    fn shows_invisibles(&self) -> bool {
+        self.mode.is_full() || self.show_invisibles_outside_full_mode
+    }
+
     pub fn language_at<T: ToOffset>(&self, position: T) -> Option<&Arc<Language>> {
         self.display_snapshot
             .buffer_snapshot()

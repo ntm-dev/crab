@@ -1463,6 +1463,7 @@ pub struct Workspace {
     previous_dock_drag_coordinates: Option<Point<Pixels>>,
     zoomed_position: Option<DockPosition>,
     maximized_pane: Option<WeakEntity<Pane>>,
+    bottom_dock_maximized: bool,
     center: PaneGroup,
     left_dock: Entity<Dock>,
     bottom_dock: Entity<Dock>,
@@ -1899,6 +1900,7 @@ impl Workspace {
             zoomed: None,
             zoomed_position: None,
             maximized_pane: None,
+            bottom_dock_maximized: false,
             previous_dock_drag_coordinates: None,
             center,
             panes: vec![center_pane.clone()],
@@ -4297,6 +4299,9 @@ impl Workspace {
 
         if was_visible {
             self.save_open_dock_positions(cx);
+            if dock_side == DockPosition::Bottom {
+                self.bottom_dock_maximized = false;
+            }
         }
 
         let dock = self.dock_at_position(dock_side);
@@ -7371,6 +7376,17 @@ impl Workspace {
         self.maximized_pane.is_some()
     }
 
+    pub fn is_bottom_dock_maximized(&self) -> bool {
+        self.bottom_dock_maximized
+    }
+
+    pub fn set_bottom_dock_maximized(&mut self, maximized: bool, cx: &mut Context<Self>) {
+        if self.bottom_dock_maximized != maximized {
+            self.bottom_dock_maximized = maximized;
+            cx.notify();
+        }
+    }
+
     fn adjust_padding(padding: Option<f32>) -> f32 {
         padding
             .unwrap_or(CenteredPaddingSettings::default().0)
@@ -7457,10 +7473,14 @@ impl Workspace {
                     container = container.min_w(min);
                 }
             } else {
-                let size = size_state
-                    .and_then(|state| state.size)
-                    .unwrap_or_else(|| panel.default_size(window, cx));
-                container = container.h(size);
+                if self.bottom_dock_maximized && position == DockPosition::Bottom {
+                    container = container.flex_1().min_h_0();
+                } else {
+                    let size = size_state
+                        .and_then(|state| state.size)
+                        .unwrap_or_else(|| panel.default_size(window, cx));
+                    container = container.h(size);
+                }
             }
             container = match position {
                 DockPosition::Left => {
@@ -8667,6 +8687,9 @@ impl Render for Workspace {
                                                 .child(
                                                     h_flex()
                                                         .flex_1()
+                                                        .when(self.bottom_dock_maximized, |this| {
+                                                            this.hidden()
+                                                        })
                                                         .when_some(paddings.0, |this, p| {
                                                             this.child(p.border_r_1())
                                                         })
@@ -9827,7 +9850,7 @@ pub fn reload(cx: &mut App) {
         prompt = window
             .update(cx, |_, window, cx| {
                 window.prompt(
-                    PromptLevel::Info,
+                    PromptLevel::Warning,
                     &t!("Are you sure you want to restart?"),
                     None,
                     &[

@@ -528,7 +528,12 @@ impl EditorElement {
                         .then(|| multi_buffer_range.clone()),
                 })
         {
-            editor.toggle_git_peek(hovered_hunk.start, window, cx);
+            let focus = position_map.snapshot.buffer_snapshot().anchor_before(
+                point_for_position
+                    .nearest_valid
+                    .to_point(&position_map.snapshot.display_snapshot),
+            );
+            editor.toggle_git_peek(hovered_hunk.start, focus, window, cx);
             cx.notify();
             return;
         } else if gutter_hitbox.is_hovered(window) {

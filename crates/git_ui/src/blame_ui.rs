@@ -1,5 +1,7 @@
 use crate::{
-    commit_tooltip::{CommitAvatar, CommitTooltip, commit_tag_chips, shallow_boundary_notice},
+    commit_tooltip::{
+        CommitAvatar, CommitTooltip, LineChangeState, commit_tag_chips, shallow_boundary_notice,
+    },
     commit_view::{CommitView, GitBlob, build_buffer, worktree_id_for_repo_path},
 };
 use anyhow::Context as _;
@@ -406,6 +408,25 @@ impl BlameRenderer for GitBlameRenderer {
             .then(|| shallow_boundary_notice(repository.clone(), workspace.clone(), window, cx))
             .flatten();
 
+        let line_change_state = window.use_keyed_state(
+            SharedString::from(format!(
+                "inline-blame-line-change-{sha}-{}-{}",
+                blame.filename, blame.original_line_number
+            )),
+            cx,
+            |_, cx| {
+                LineChangeState::new(
+                    &repository,
+                    sha.to_string(),
+                    blame.filename.clone(),
+                    blame.original_line_number,
+                    blame.range.end.saturating_sub(blame.range.start),
+                    cx,
+                )
+            },
+        );
+        let line_change = line_change_state.read(cx).render(cx);
+
         Some(
             tooltip_container(cx, |this, cx| {
                 this.occlude()
@@ -442,6 +463,7 @@ impl BlameRenderer for GitBlameRenderer {
                                     .overflow_y_scroll()
                                     .child(message),
                             )
+                            .children(line_change)
                             .child(
                                 h_flex()
                                     .text_color(cx.theme().colors().text_muted)
