@@ -2297,7 +2297,7 @@ dependencies = [
 
 [[package]]
 name = "crab"
-version = "1.0.4"
+version = "1.0.3"
 dependencies = [
  "activity_indicator",
  "agent_chat",
