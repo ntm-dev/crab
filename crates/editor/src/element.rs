@@ -2225,6 +2225,13 @@ impl EditorElement {
             .editor
             .read_with(cx, |editor, _| editor.workspace().map(|w| w.downgrade()));
 
+        let language_settings = self
+            .editor
+            .read(cx)
+            .buffer
+            .read(cx)
+            .language_settings(cx);
+
         let maybe_element = workspace.and_then(|workspace| {
             render_blame_entry_popover(
                 blame_entry,
@@ -2232,6 +2239,7 @@ impl EditorElement {
                 popover_state.commit_message,
                 popover_state.markdown,
                 workspace,
+                language_settings,
                 &blame,
                 buffer_id,
                 window,
@@ -7212,6 +7220,7 @@ fn render_blame_entry_popover(
     commit_message: Option<ParsedCommitMessage>,
     markdown: Entity<Markdown>,
     workspace: WeakEntity<Workspace>,
+    language_settings: Arc<language::language_settings::LanguageSettings>,
     blame: &Entity<GitBlame>,
     buffer: BufferId,
     window: &mut Window,
@@ -7233,6 +7242,7 @@ fn render_blame_entry_popover(
         markdown,
         repository,
         workspace,
+        language_settings,
         window,
         cx,
     )
@@ -11981,6 +11991,7 @@ mod tests {
                 _: Entity<Markdown>,
                 _: Entity<project::git_store::Repository>,
                 _: WeakEntity<Workspace>,
+                _: Arc<language::language_settings::LanguageSettings>,
                 _: &mut Window,
                 _: &mut App,
             ) -> Option<AnyElement> {

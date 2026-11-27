@@ -13,6 +13,7 @@ use gpui::{
     ScrollHandle, StatefulInteractiveElement, Task, WeakEntity, Window, prelude::*,
 };
 use i18n::t;
+use language::{DiffOptions, word_diff_ranges};
 use markdown::{Markdown, MarkdownElement};
 use notifications::status_toast::StatusToast;
 use project::git_store::{Repository, UnshallowState};
@@ -20,8 +21,11 @@ use settings::Settings;
 use std::hash::Hash;
 use theme_settings::ThemeSettings;
 use time::{OffsetDateTime, UtcOffset};
+use ui::{
+    Avatar, Chip, CopyButton, Divider, ScrollAxes, Scrollbars, Tooltip, WithScrollbar, prelude::*,
+    tooltip_container,
+};
 use util::ResultExt as _;
-use ui::{Avatar, Chip, CopyButton, Divider, Tooltip, prelude::*, tooltip_container};
 use workspace::Workspace;
 
 #[derive(Clone, Debug)]
@@ -218,7 +222,44 @@ impl Asset for CommitAvatarAsset {
 
 const MAX_LINE_CHANGE_ROWS: usize = 6;
 
-#[derive(Default)]
+fn shown_whitespace_offsets(
+    line: &str,
+    setting: language::language_settings::ShowWhitespaceSetting,
+) -> std::collections::HashSet<usize> {
+    use language::language_settings::ShowWhitespaceSetting;
+
+    let whitespace: Vec<(usize, char)> = line
+        .char_indices()
+        .filter(|(_, character)| matches!(character, ' ' | '\t'))
+        .collect();
+    let is_whitespace_at =
+        |offset: usize| matches!(line.as_bytes().get(offset), Some(b' ' | b'\t'));
+    match setting {
+        ShowWhitespaceSetting::None | ShowWhitespaceSetting::Selection => Default::default(),
+        ShowWhitespaceSetting::All => whitespace.into_iter().map(|(offset, _)| offset).collect(),
+        ShowWhitespaceSetting::Trailing => {
+            let trimmed_len = line.trim_end_matches([' ', '\t']).len();
+            whitespace
+                .into_iter()
+                .map(|(offset, _)| offset)
+                .filter(|offset| *offset >= trimmed_len)
+                .collect()
+        }
+        ShowWhitespaceSetting::Boundary => whitespace
+            .into_iter()
+            .filter(|(offset, character)| {
+                *character == '\t'
+                    || *offset == 0
+                    || *offset + 1 == line.len()
+                    || (*offset > 0 && is_whitespace_at(*offset - 1))
+                    || is_whitespace_at(*offset + 1)
+            })
+            .map(|(offset, _)| offset)
+            .collect(),
+    }
+}
+
+#[derive(Default, Clone)]
 pub struct LineChange {
     removed: Vec<SharedString>,
     added: Vec<SharedString>,
@@ -226,10 +267,16 @@ pub struct LineChange {
 
 pub struct LineChangeState {
     change: Option<LineChange>,
+    loaded: bool,
+    scroll_handle: ScrollHandle,
     _task: Task<()>,
 }
 
 impl LineChangeState {
+    pub fn is_loaded(&self) -> bool {
+        self.loaded
+    }
+
     pub fn new(
         repository: &Entity<Repository>,
         sha: String,
@@ -238,112 +285,266 @@ impl LineChangeState {
         line_count: u32,
         cx: &mut Context<Self>,
     ) -> Self {
-        let receiver = repository.update(cx, |repository, _| {
-            repository.load_commit_diff(sha, true)
-        });
+        let receiver =
+            repository.update(cx, |repository, _| repository.load_commit_diff(sha, true));
         let task = cx.spawn(async move |this, cx| {
-            let Some(diff) = receiver.await.ok().and_then(|result| result.log_err()) else {
-                return;
-            };
-            let Some(file) = diff
-                .files
-                .into_iter()
-                .find(|file| file.path.as_unix_str() == filename)
-            else {
-                return;
-            };
-            if file.is_binary {
-                return;
-            }
-            let old_text = file.old_text.unwrap_or_default();
-            let new_text = file.new_text.unwrap_or_default();
-            let old_lines: Vec<&str> = old_text.lines().collect();
-            let new_lines: Vec<&str> = new_text.lines().collect();
-            let target_start = line_start.saturating_sub(1);
-            let target_end = target_start + line_count.max(1);
-
-            let mut change = LineChange::default();
-            for (old_rows, new_rows) in language::line_diff(&old_text, &new_text) {
-                if new_rows.is_empty() || new_rows.start >= target_end || new_rows.end <= target_start
-                {
-                    continue;
+            let change = async {
+                let Some(diff) = receiver.await.ok().and_then(|result| result.log_err()) else {
+                    return None;
+                };
+                let Some(file) = diff
+                    .files
+                    .into_iter()
+                    .find(|file| file.path.as_unix_str() == filename)
+                else {
+                    return None;
+                };
+                if file.is_binary {
+                    return None;
                 }
-                let overlapping_rows = new_rows.start.max(target_start)..new_rows.end.min(target_end);
-                let is_one_to_one = old_rows.len() == new_rows.len();
-                if !is_one_to_one {
-                    for row in old_rows.clone() {
-                        if let Some(line) = old_lines.get(row as usize) {
+                let old_text = file.old_text.unwrap_or_default();
+                let new_text = file.new_text.unwrap_or_default();
+                let old_lines: Vec<&str> = old_text.lines().collect();
+                let new_lines: Vec<&str> = new_text.lines().collect();
+                let target_start = line_start.saturating_sub(1);
+                let target_end = target_start + line_count.max(1);
+
+                let mut change = LineChange::default();
+                for (old_rows, new_rows) in language::line_diff(&old_text, &new_text) {
+                    if new_rows.is_empty()
+                        || new_rows.start >= target_end
+                        || new_rows.end <= target_start
+                    {
+                        continue;
+                    }
+                    let overlapping_rows =
+                        new_rows.start.max(target_start)..new_rows.end.min(target_end);
+                    let is_one_to_one = old_rows.len() == new_rows.len();
+                    if !is_one_to_one {
+                        for row in old_rows.clone() {
+                            if let Some(line) = old_lines.get(row as usize) {
+                                change.removed.push(SharedString::from(line.to_string()));
+                            }
+                        }
+                    }
+                    for row in overlapping_rows {
+                        if is_one_to_one
+                            && let Some(line) =
+                                old_lines.get((old_rows.start + row - new_rows.start) as usize)
+                        {
                             change.removed.push(SharedString::from(line.to_string()));
+                        }
+                        if let Some(line) = new_lines.get(row as usize) {
+                            change.added.push(SharedString::from(line.to_string()));
                         }
                     }
                 }
-                for row in overlapping_rows {
-                    if is_one_to_one
-                        && let Some(line) =
-                            old_lines.get((old_rows.start + row - new_rows.start) as usize)
-                    {
-                        change.removed.push(SharedString::from(line.to_string()));
-                    }
-                    if let Some(line) = new_lines.get(row as usize) {
-                        change.added.push(SharedString::from(line.to_string()));
-                    }
+                if change.removed.is_empty() && change.added.is_empty() {
+                    return None;
                 }
+                Some(change)
             }
-            if change.removed.is_empty() && change.added.is_empty() {
-                return;
-            }
+            .await;
             this.update(cx, |this, cx| {
-                this.change = Some(change);
+                this.change = change;
+                this.loaded = true;
                 cx.notify();
             })
             .log_err();
         });
         Self {
             change: None,
+            loaded: false,
+            scroll_handle: ScrollHandle::new(),
             _task: task,
         }
     }
 
-    pub fn render(&self, cx: &App) -> Option<impl IntoElement + use<>> {
-        let change = self.change.as_ref()?;
+    pub fn render(
+        state: &Entity<Self>,
+        language_settings: &language::language_settings::LanguageSettings,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<impl IntoElement + use<>> {
+        let (change, scroll_handle) = {
+            let state = state.read(cx);
+            (state.change.clone()?, state.scroll_handle.clone())
+        };
+        let change = &change;
         let status = cx.theme().status();
         let removed_background = status.deleted_background;
         let added_background = status.created_background;
-        let border = cx.theme().colors().border_variant;
-        let row = |prefix: &'static str, line: &SharedString, background| {
+        let colors = cx.theme().colors();
+        let invisible_color = colors.text_muted;
+        let whitespace_setting = language_settings.show_whitespaces;
+        let whitespace_map = language_settings.whitespace_map.clone();
+        let removed_word_background = colors.version_control_word_deleted;
+        let added_word_background = colors.version_control_word_added;
+        let theme_settings = ThemeSettings::get_global(cx);
+        let buffer_font = theme_settings.buffer_font.clone();
+
+        let mut removed_highlights = vec![Vec::new(); change.removed.len()];
+        let mut added_highlights = vec![Vec::new(); change.added.len()];
+        let mut used_removed = vec![false; change.removed.len()];
+        for (added_index, added) in change.added.iter().enumerate() {
+            let mut best: Option<(usize, usize, Vec<_>, Vec<_>)> = None;
+            for (removed_index, removed) in change.removed.iter().enumerate() {
+                if used_removed[removed_index] || removed.trim().is_empty() {
+                    continue;
+                }
+                let (removed_ranges, added_ranges) =
+                    word_diff_ranges(removed, added, DiffOptions::default());
+                let changed: usize = removed_ranges
+                    .iter()
+                    .map(|range| range.len())
+                    .sum::<usize>()
+                    + added_ranges.iter().map(|range| range.len()).sum::<usize>();
+                if best.as_ref().is_none_or(|(_, cost, _, _)| changed < *cost) {
+                    best = Some((removed_index, changed, removed_ranges, added_ranges));
+                }
+            }
+            if let Some((removed_index, _, removed_ranges, added_ranges)) = best {
+                used_removed[removed_index] = true;
+                removed_highlights[removed_index] = removed_ranges;
+                added_highlights[added_index] = added_ranges;
+            } else {
+                added_highlights[added_index] = vec![0..added.len()];
+            }
+        }
+        if change.added.is_empty() {
+            for (index, removed) in change.removed.iter().enumerate() {
+                used_removed[index] = true;
+                removed_highlights[index] = vec![0..removed.len()];
+            }
+        }
+
+        let font_size = rems(0.75).to_pixels(window.rem_size());
+        let cell_width = {
+            let text_system = window.text_system();
+            let font_id = text_system.resolve_font(&buffer_font);
+            text_system
+                .em_advance(font_id, font_size)
+                .unwrap_or(font_size * 0.6)
+        };
+        let line_height = font_size * 1.5;
+        let tab_size = language_settings.tab_size.get();
+
+        let row = |prefix: &'static str,
+                   line: &SharedString,
+                   background,
+                   word_background,
+                   ranges: &[std::ops::Range<usize>]| {
+            let shown = shown_whitespace_offsets(line, whitespace_setting);
+            let in_word = |offset: usize| ranges.iter().any(|range| range.contains(&offset));
+            let mut segments: Vec<AnyElement> = Vec::new();
+            let mut text = String::new();
+            let mut text_in_word = false;
+            let flush = |segments: &mut Vec<AnyElement>, text: &mut String, text_in_word: bool| {
+                if text.is_empty() {
+                    return;
+                }
+                let content = SharedString::from(std::mem::take(text));
+                segments.push(
+                    div()
+                        .flex_none()
+                        .whitespace_nowrap()
+                        .when(text_in_word, |this| this.bg(word_background))
+                        .child(content)
+                        .into_any_element(),
+                );
+            };
+            for (offset, character) in line.char_indices() {
+                let marked = in_word(offset);
+                let symbol = match character {
+                    ' ' if shown.contains(&offset) => Some((whitespace_map.space.clone(), 1)),
+                    '\t' if shown.contains(&offset) => Some((whitespace_map.tab.clone(), tab_size)),
+                    _ => None,
+                };
+                match symbol {
+                    Some((symbol, cells)) => {
+                        flush(&mut segments, &mut text, text_in_word);
+                        segments.push(
+                            div()
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .self_stretch()
+                                .w(cell_width * cells as f32)
+                                .text_size(font_size / 2.)
+                                .line_height(line_height)
+                                .text_color(invisible_color)
+                                .when(marked, |this| this.bg(word_background))
+                                .child(SharedString::from(symbol.to_string()))
+                                .into_any_element(),
+                        );
+                    }
+                    None => {
+                        if marked != text_in_word {
+                            flush(&mut segments, &mut text, text_in_word);
+                        }
+                        text_in_word = marked;
+                        text.push(character);
+                    }
+                }
+            }
+            flush(&mut segments, &mut text, text_in_word);
             h_flex()
-                .w_full()
                 .px_1()
                 .gap_1()
                 .bg(background)
-                .child(Label::new(prefix).buffer_font(cx).size(LabelSize::Small))
-                .child(
-                    div().min_w_0().overflow_x_hidden().child(
-                        Label::new(line.clone())
-                            .buffer_font(cx)
-                            .size(LabelSize::Small)
-                            .single_line(),
-                    ),
-                )
+                .font(buffer_font.clone())
+                .text_xs()
+                .line_height(line_height)
+                .child(div().flex_none().child(prefix))
+                .child(h_flex().flex_none().children(segments))
         };
         Some(
-            v_flex()
+            h_flex()
+                .id("line-change-scroll")
+                .items_start()
+                .w_full()
                 .py_1()
-                .border_t_1()
-                .border_color(border)
-                .children(
-                    change
-                        .removed
-                        .iter()
-                        .take(MAX_LINE_CHANGE_ROWS)
-                        .map(|line| row("-", line, removed_background)),
+                .custom_scrollbars(
+                    Scrollbars::new(ScrollAxes::Horizontal)
+                        .id(("line-change-scrollbar", state.entity_id()))
+                        .tracked_scroll_handle(&scroll_handle),
+                    window,
+                    cx,
                 )
-                .children(
-                    change
-                        .added
-                        .iter()
-                        .take(MAX_LINE_CHANGE_ROWS)
-                        .map(|line| row("+", line, added_background)),
+                .overflow_x_scroll()
+                .child(
+                    v_flex()
+                        .min_w_full()
+                        .flex_none()
+                        .children(
+                            change
+                                .removed
+                                .iter()
+                                .zip(&removed_highlights)
+                                .zip(&used_removed)
+                                .filter(|(_, used)| **used)
+                                .take(MAX_LINE_CHANGE_ROWS)
+                                .map(|((line, ranges), _)| {
+                                    row(
+                                        "-",
+                                        line,
+                                        removed_background,
+                                        removed_word_background,
+                                        ranges,
+                                    )
+                                }),
+                        )
+                        .children(
+                            change
+                                .added
+                                .iter()
+                                .zip(&added_highlights)
+                                .take(MAX_LINE_CHANGE_ROWS)
+                                .map(|(line, ranges)| {
+                                    row("+", line, added_background, added_word_background, ranges)
+                                }),
+                        ),
                 ),
         )
     }
@@ -508,10 +709,12 @@ impl Render for CommitTooltip {
             })
             .flatten();
 
+        let language_settings =
+            language::language_settings::LanguageSettings::resolve(None, None, cx);
         let line_change = self
             .line_change
             .as_ref()
-            .and_then(|state| state.read(cx).render(cx));
+            .and_then(|state| LineChangeState::render(state, &language_settings, window, cx));
 
         tooltip_container(cx, move |this, cx| {
             this.occlude()

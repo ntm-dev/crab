@@ -312,6 +312,7 @@ impl BlameRenderer for GitBlameRenderer {
         markdown: Entity<Markdown>,
         repository: Entity<Repository>,
         workspace: WeakEntity<Workspace>,
+        language_settings: std::sync::Arc<language::language_settings::LanguageSettings>,
         window: &mut Window,
         cx: &mut App,
     ) -> Option<AnyElement> {
@@ -425,7 +426,11 @@ impl BlameRenderer for GitBlameRenderer {
                 )
             },
         );
-        let line_change = line_change_state.read(cx).render(cx);
+        if !line_change_state.read(cx).is_loaded() {
+            return None;
+        }
+        let line_change =
+            LineChangeState::render(&line_change_state, &language_settings, window, cx);
 
         Some(
             tooltip_container(cx, |this, cx| {

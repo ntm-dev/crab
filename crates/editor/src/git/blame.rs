@@ -144,6 +144,7 @@ pub trait BlameRenderer {
         _: Entity<Markdown>,
         _: Entity<Repository>,
         _: WeakEntity<Workspace>,
+        _: Arc<language::language_settings::LanguageSettings>,
         _: &mut Window,
         _: &mut App,
     ) -> Option<AnyElement>;
@@ -209,6 +210,7 @@ impl BlameRenderer for () {
         _: Entity<Markdown>,
         _: Entity<Repository>,
         _: WeakEntity<Workspace>,
+        _: Arc<language::language_settings::LanguageSettings>,
         _: &mut Window,
         _: &mut App,
     ) -> Option<AnyElement> {

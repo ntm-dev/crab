@@ -6610,6 +6610,24 @@ impl GitPanel {
         )
     }
 
+    fn render_publish_button(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let upstream_is_missing = self
+            .active_repository
+            .as_ref()?
+            .read(cx)
+            .branch
+            .as_ref()
+            .is_some_and(|branch| {
+                branch.upstream.as_ref().is_none_or(|upstream| {
+                    matches!(upstream.tracking, UpstreamTracking::Gone)
+                })
+            });
+        if !upstream_is_missing {
+            return None;
+        }
+        self.render_remote_button(cx)
+    }
+
     pub(crate) fn render_remote_button(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let branch = self.active_repository.as_ref()?.read(cx).branch.clone();
         if !self.can_push_and_pull(cx) {
@@ -6735,7 +6753,7 @@ impl GitPanel {
                                     let nothing_to_commit =
                                         self.entry_count == 0 && !self.amend_pending;
                                     match nothing_to_commit
-                                        .then(|| self.render_remote_button(cx))
+                                        .then(|| self.render_publish_button(cx))
                                         .flatten()
                                     {
                                         Some(remote) => this.child(remote),
